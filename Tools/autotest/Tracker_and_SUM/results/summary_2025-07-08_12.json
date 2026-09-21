@@ -1,0 +1,16 @@
+{
+    "total_encounters": 0,
+    "total_wcv": 0,
+    "total_nmacs": 0,
+    "total_macs": 0,
+    "total_two_or_fewer": 0,
+    "total_three_or_four": 0,
+    "total_three_no_nmac": 0,
+    "total_ca_count": 20,
+    "total_c20_count": 11,
+    "total_c21_count": 9,
+    "files": [
+        "./example_encounters/extracted_ownship_data73.mat",
+        "./example_encounters/extracted_intruder_data73.mat"
+    ]
+}

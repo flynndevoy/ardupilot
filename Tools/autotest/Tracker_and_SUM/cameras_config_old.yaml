@@ -1,0 +1,84 @@
+configs:
+  generate_synthetic_uncertainty: True
+  generate_detection_uncertainty: True
+
+  uncertainty_model_files:
+    pixel_model_state_path: "SUM/pixel_uncertainty_model.pkl"
+    range_bins_path: "SUM/range_bins.npy"
+    range_model_input_format_path: "SUM/range_error_model_input_format.pkl"
+    range_model_params_path: "SUM/range_model_params.pkl"
+    detected_range_model_params_path: "SUM/detected_range_model_params.pkl"
+    pdet_uncertainty_model: "SUM/pdet_uncertainty_model.pkl"
+    pdet_transition_models: "SUM/pdet_transition_models.pkl"
+
+  daidalus_input_coord_frame:
+    cartesian: True
+    centered: False
+    aligned: False
+
+  cameras:
+    - id: 0
+      name: Front-Left
+      resolution:
+        width: 9344
+        height: 7000
+      fov:
+        horizontal_deg: 61.76
+        vertical_deg: 48.26
+      position: [0.0, 0.0, 0.0]
+      orientation_rpy_deg: [0.0, 0.0, 329.62]
+
+    - id: 1
+      name: Side-Left
+      resolution:
+        width: 9344
+        height: 7000
+      fov:
+        horizontal_deg: 68.4
+        vertical_deg: 53.96
+      position: [0.0, 0.0, 0.0]
+      orientation_rpy_deg: [0.0, 0.0, 265.04]
+
+    - id: 2
+      name: Rear-Left
+      resolution:
+        width: 9344
+        height: 7000
+      fov:
+        horizontal_deg: 76.4
+        vertical_deg: 61.04
+      position: [0.0, 0.0, 0.0]
+      orientation_rpy_deg: [0.0, 0.0, 193.14]
+
+    - id: 3
+      name: Front-Right
+      resolution:
+        width: 9344
+        height: 7000
+      fov:
+        horizontal_deg: 61.76
+        vertical_deg: 48.26
+      position: [0.0, 0.0, 0.0]
+      orientation_rpy_deg: [0.0, 0.0, 30.38]
+
+    - id: 4
+      name: Side-Right
+      resolution:
+        width: 9344
+        height: 7000
+      fov:
+        horizontal_deg: 68.4
+        vertical_deg: 53.96
+      position: [0.0, 0.0, 0.0]
+      orientation_rpy_deg: [0.0, 0.0, 94.96]
+
+    - id: 5
+      name: Rear-Right
+      resolution:
+        width: 9344
+        height: 7000
+      fov:
+        horizontal_deg: 76.4
+        vertical_deg: 61.04
+      position: [0.0, 0.0, 0.0]
+      orientation_rpy_deg: [0.0, 0.0, 166.86]

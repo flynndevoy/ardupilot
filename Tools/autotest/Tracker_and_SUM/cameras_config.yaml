@@ -1,0 +1,62 @@
+configs:
+  generate_synthetic_uncertainty: True
+  generate_detection_uncertainty: True
+
+  uncertainty_model_files:
+    pixel_model_state_path: "SUM/pixel_uncertainty_model.pkl"
+    range_bins_path: "SUM/range_bins.npy"
+    range_model_input_format_path: "SUM/range_error_model_input_format.pkl"
+    range_model_params_path: "SUM/range_model_params.pkl"
+    detected_range_model_params_path: "SUM/detected_range_model_params.pkl"
+    pdet_uncertainty_model: "SUM/pdet_uncertainty_model.pkl"
+    pdet_transition_models: "SUM/pdet_transition_models.pkl"
+
+  daidalus_input_coord_frame:
+    cartesian: True
+    centered: False
+    aligned: False
+
+  cameras:
+    - id: 0
+      name: Front-Left
+      resolution:
+        width: 4096
+        height: 3072
+      fov:
+        horizontal_deg: 61.76
+        vertical_deg: 48.26
+      position: [0.0, -1.920, 1.223]
+      orientation_rpy_deg: [0.0, 0.0, 330.96]
+
+    - id: 1
+      name: Side-Left
+      resolution:
+        width: 4096
+        height: 3072
+      fov:
+        horizontal_deg: 66.05
+        vertical_deg: 51.93
+      position: [-1.260, -0.485, 1.18]
+      orientation_rpy_deg: [0.0, 0.0, 275.97]
+
+    - id: 2
+      name: Front-Right
+      resolution:
+        width: 4096
+        height: 3072
+      fov:
+        horizontal_deg: 61.76
+        vertical_deg: 48.26
+      position: [0.0, 1.920, 1.223]
+      orientation_rpy_deg: [0.0, 0.0, 29.04]
+
+    - id: 3
+      name: Side-Right
+      resolution:
+        width: 4096
+        height: 3072
+      fov:
+        horizontal_deg: 66.05
+        vertical_deg: 51.93
+      position: [-1.260, 0.485, 1.18]
+      orientation_rpy_deg: [0.0, 0.0, 84.02]

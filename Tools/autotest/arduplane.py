@@ -29,10 +29,55 @@ from pysim import util
 
 import operator
 
+# Rev Aero encounter
+import mat73
+import scipy
+import numpy as np
+# from daidalusClient import DaidalusClient
+from SUM_Client import SUMClient
+import time
+from ownship_position import OwnshipPosition
+import datetime
+import navpy
+import matplotlib.pyplot as plt
+import nasa_atmos as atmos
+import subprocess
+import csv
+from hmi_server import HMIConnection
+import camera_stream_pb2, camera_stream_pb2_grpc, msg_to_hmi_pb2, msg_to_hmi_pb2_grpc, statuses_updates_pb2, statuses_updates_pb2_grpc
+from pathlib import Path
+import netifaces
+from encounter_sim_helpers import EncounterSimLogger, EncounterGeometry
+
+# from tracker import *
+# from ownship_camera_classes import *
+# from synthetic_encounter_classes import *
+# from sum_functions import *
+from Tracker_and_SUM.tracker import *
+from Tracker_and_SUM.ownship_camera_classes import *
+from Tracker_and_SUM.synthetic_encounter_classes import *
+from Tracker_and_SUM.sum_functions import *
+from Tracker_and_SUM.daidalusClient import DaidalusClient
+from Tracker_and_SUM.async_daidalus_client import Guidance_Thread
+
 # get location of scripts
 testdir = os.path.dirname(os.path.realpath(__file__))
 SITL_START_LOCATION = mavutil.location(-35.362938, 149.165085, 585, 354)
 WIND = "0,180,0.2"  # speed,direction,variance
+
+
+# State hashing function for keeping track of state updates in each thread
+import orjson
+import hashlib
+_ORJSON_OPTS = (
+    orjson.OPT_SORT_KEYS       # stable ordering
+    | orjson.OPT_SERIALIZE_NUMPY  # handles numpy arrays/scalars
+    | orjson.OPT_NON_STR_KEYS  # if any dict keys aren’t strings
+)
+
+def state_id_fingerprint(obj, digest_size: int = 16) -> str:
+        b = orjson.dumps(obj, option=_ORJSON_OPTS)
+        return hashlib.blake2b(b, digest_size=digest_size).hexdigest()
 
 
 class AutoTestPlane(vehicle_test_suite.TestSuite):
@@ -1143,18 +1188,6 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             raise NotAchievedException("Bad relalt (want=%f vs got=%f)" % (takeoff_alt, x.alt_rel))
         if abs(x.alt_msl - (original_alt+30)) > 10:
             raise NotAchievedException("Bad absalt (want=%f vs got=%f)" % (original_alt+30, x.alt_msl))
-
-        self.change_mode('LOITER')
-        self.delay_sim_time(10)
-
-        self.context_collect('CAMERA_FEEDBACK')
-        self.set_rc(12, 2000)
-        self.delay_sim_time(1)
-        self.set_rc(12, 1000)
-        self.assert_received_message_field_values('CAMERA_FEEDBACK', {
-            "roll": math.degrees(self.assert_receive_message('ATTITUDE').roll),
-        }, check_context=True, epsilon=5.0)
-
         self.fly_home_land_and_disarm()
 
     def ThrottleFailsafe(self):
@@ -2041,7 +2074,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             self.progress("Orbit with GPS and learn wind")
             # allow longer to learn wind if there is no airspeed sensor
             if disable_airspeed_sensor:
-                self.delay_sim_time(180)
+                self.delay_sim_time(60)
             else:
                 self.delay_sim_time(20)
             self.set_parameter("SIM_GPS1_ENABLE", 0)
@@ -5057,9 +5090,6 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
 
         self.set_parameters({
             "TKOFF_ROTATE_SPD": 15.0,
-            "TKOFF_PLIM_SEC": 0,  # Ensure TKOFF_PLIM_SEC doesn't interfere with the test.
-            "TKOFF_DIST": 500,  # Ensure stall prevention doesn't interfere with the test.
-            "TKOFF_ALT": 100  # Ditto
         })
         self.change_mode("TAKEOFF")
 
@@ -5074,7 +5104,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             raise NotAchievedException(f"Did not achieve correct takeoff pitch ({nav_pitch}).")
 
         # Check whether we've achieved correct target pitch after rotation.
-        self.wait_groundspeed(24, 25)
+        self.wait_groundspeed(23, 24)
         m = self.assert_receive_message('NAV_CONTROLLER_OUTPUT', timeout=5)
         nav_pitch = m.nav_pitch
         if nav_pitch > 15.1 or nav_pitch < 14.9:
@@ -5150,39 +5180,6 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
 
         self.disarm_vehicle(force=True)
 
-    def TakeoffLevelOffWind(self):
-        '''Ensure the level-off functionality works.'''
-        '''
-        This is primarily targeted to test whether the level-off angle works
-        correctly even though the groundspeed eventually drops in face of wind.
-        '''
-        tkoff_alt = 100.
-        self.set_parameters({
-            "TKOFF_ROTATE_SPD": 15.0,
-            "TKOFF_ALT": tkoff_alt,
-            "TKOFF_DIST": 500,  # Ensure stall prevention doesn't interfere with the test.
-            "TKOFF_PLIM_SEC": 5  # Give some more time to detect the level-off.
-        })
-        self.change_mode("TAKEOFF")
-
-        self.wait_ready_to_arm()
-        self.arm_vehicle()
-
-        # Wait until we're well past the rotation.
-        self.wait_groundspeed(24, 25)
-
-        self.set_parameters({
-            "SIM_WIND_DIR": 0.0,  # Set North wind.
-            "SIM_WIND_SPD": 10.0  # Enough to bring groundspeed below cruise speed.
-        })
-
-        self.wait_altitude(tkoff_alt-10, tkoff_alt, relative=True)
-        self.wait_level_flight(accuracy=10, timeout=1)  # Ensure we have roughly level-off.
-        self.delay_sim_time(5)
-
-        self.change_mode('AUTOLAND')
-        self.wait_disarmed(timeout=180)
-
     def DCMFallback(self):
         '''Really annoy the EKF and force fallback'''
         self.reboot_sitl()
@@ -5220,8 +5217,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         self.wait_statustext("DCM Active", check_context=True)
         self.context_stop_collecting('STATUSTEXT')
 
-        self.change_mode('AUTOLAND')
-        self.wait_disarmed(timeout=180)
+        self.fly_home_land_and_disarm()
 
     def EFITest(self, efi_type, name, sim_name, check_fuel_flow=True):
         '''method to be called by EFI tests'''
@@ -7244,64 +7240,1576 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             if abs(m.Pos - m.PosCmd) > 20:
                 break
 
-    def MAV_CMD_NAV_LOITER_TURNS_zero_turn(self):
-        '''Ensure air vehicle achieves loiter target before exiting'''
-        offset = 500
-        alt = self.get_parameter("RTL_ALTITUDE")
-        waypoint_radius = 100
+# <DAA
 
-        loiter_turns_loc_ccw = self.home_relative_loc_ne(offset, offset)
-        loiter_turns_loc_cw = self.home_relative_loc_ne(offset, -offset)
+    def sitl_streamrate(self):
+        """Override SITL streamrate."""
+        return 200
+    
+    def send_cmd_int(self,
+                 command,
+                 p1=0,
+                 p2=0,
+                 p3=0,
+                 p4=0,
+                 p5=0,
+                 p6=0,
+                 p7=0,
+                 target_sysid=None,
+                 target_compid=None,
+                 mav=None,
+                 quiet=False,
+                 frame=mavutil.mavlink.MAV_FRAME_GLOBAL_INT,
+                 ):
+        """Send a MAVLink command int."""
+        if mav is None:
+            mav = self.mav
+        if target_sysid is None:
+            target_sysid = self.sysid_thismav()
+        if target_compid is None:
+            target_compid = 1
+        if not quiet:
+            try:
+                command_name = mavutil.mavlink.enums["MAV_CMD"][command].name
+            except KeyError:
+                command_name = "UNKNOWN"
+            self.progress("Sending COMMAND_INT to (%u,%u) (%s=%u) (p1=%f p2=%f p3=%f p4=%f p5=%f p6=%f  p7=%f)" %
+                          (
+                              target_sysid,
+                              target_compid,
+                              command_name,
+                              command,
+                              p1,
+                              p2,
+                              p3,
+                              p4,
+                              p5,
+                              p6,
+                              p7))
+        mav.mav.command_int_send(target_sysid,
+                                 target_compid,
+                                 frame,
+                                 command,
+                                 0, # current
+                                 0, # autocontinue
+                                 p1,
+                                 p2,
+                                 p3,
+                                 p4,
+                                 p5,
+                                 p6,
+                                 p7)
+    
+    def distance(self, lat1, lon1, lat2, lon2):
+        """Used to check fly to distance"""
+        r = 6371 # km
+        p = math.pi / 180
+    
+        a = 0.5 - math.cos((lat2-lat1)*p)/2 + math.cos(lat1*p) * math.cos(lat2*p) * (1-math.cos((lon2-lon1)*p))/2
+        return 2 * r * math.asin(math.sqrt(a)) * 1000.0
+    
+    def get_point_at_distance(self, lat1, lon1, d, bearing, R=6371):
+        """
+        lat: initial latitude, in degrees
+        lon: initial longitude, in degrees
+        d: target distance from initial
+        bearing: (true) heading in degrees
+        R: optional radius of sphere, defaults to mean radius of earth
+        
+        Returns new lat/lon coordinate {d}km from initial, in degrees
+        """
+        lat1 = math.radians(lat1)
+        lon1 = math.radians(lon1)
+        a = math.radians(bearing)
+        lat2 = math.asin(math.sin(lat1) * math.cos(d/R) + math.cos(lat1) * math.sin(d/R) * math.cos(a))
+        lon2 = lon1 + math.atan2(
+            math.sin(a) * math.sin(d/R) * math.cos(lat1),
+            math.cos(d/R) - math.sin(lat1) * math.sin(lat2)
+        )
+        return (math.degrees(lat2), math.degrees(lon2),)
 
-        # upload a mission plan containing zero-turn loiters
-        self.upload_simple_relhome_mission([
-            (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 10),
-            self.create_MISSION_ITEM_INT(
-                mavutil.mavlink.MAV_CMD_NAV_LOITER_TURNS,
-                p1=0,                # Turns
-                p3=-waypoint_radius, # Radius (If positive loiter clockwise, else counter-clockwise)
-                x=int(loiter_turns_loc_ccw.lat*1e7),
-                y=int(loiter_turns_loc_ccw.lng*1e7),
-                z=alt,
-                frame=mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
-            ),
-            self.create_MISSION_ITEM_INT(
-                mavutil.mavlink.MAV_CMD_NAV_LOITER_TURNS,
-                p1=0,               # Turns
-                p3=waypoint_radius, # Radius (If positive loiter clockwise, else counter-clockwise)
-                x=int(loiter_turns_loc_cw.lat*1e7),
-                y=int(loiter_turns_loc_cw.lng*1e7),
-                z=alt,
-                frame=mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
-            ),
-            self.create_MISSION_ITEM_INT(
-                mavutil.mavlink.MAV_CMD_DO_JUMP,
-                p1=2, # waypoint to jump to
-                p2=1  # number of jumps (-1: infinite)
-            ),
-            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, -offset, -offset, alt),
-            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, -offset, offset, alt),
-        ])
+    def vector_to_heading_rad(self, east, north):
+        """
+        Convert a direction vector (east, north) into a compass heading in radians.
+        Args:
+            east (float): Eastward component of the vector.
+            north (float): Northward component of the vector.
+        Returns:
+            float: Heading in radians [0, 2pi), where 0 is north, pi/2 is east, etc.
+        """
+        # 1) Compute the usual CCW angle from east:
+        theta = np.atan2(north, east)            # range [-pi, +pi], 0 at east, +pi/2 at north
+        # 2) Rotate so 0 is at north and positive is clockwise:
+        heading = (np.pi/2 - theta) % (2 * np.pi)
+        return heading
 
-        self.change_mode("AUTO")
+    def guidance_to_grpc(self, response):
+        """Convert the Daidalus guidance dictionary to use grpc enums instead of strings"""
+        for key in response: # keys like "horizontal_guidance"
+            bands = response[key]
+            if (type(bands) == list): # bands are lists, bands have enums as strings
+                for band in bands: # each band (no 's') is a dict they should contain "region_type"
+                    if "region_type" in band.keys():
+                        region_type = band["region_type"]
+                        if region_type == "UNSPECIFIED":
+                            band["region_type"] = 0
+                        elif region_type == "NONE":
+                            band["region_type"] = 1
+                        elif region_type == "NEAR":
+                            band["region_type"] = 2
+                        elif region_type == "MID":
+                            band["region_type"] = 3
+                        elif region_type == "FAR":
+                            band["region_type"] = 4
+                        elif region_type == "RECOVERY":
+                            band["region_type"] = 5
+                        elif region_type == "UNKNOWN":
+                            band["region_type"] = 6
+                        else:
+                            band["region_type"] = 0
+        return response         
+                
+
+    def stop_SITL(self):
+        # 1) Let the harness do its normal SITL shutdown (ArduPlane, MAVLink sockets, logging, etc.)
+        super().stop_SITL()
+
+        # 2) Now forcibly kill any lingering JSBSim processes so ports 5762/5763/etc. free up
+        try:
+            # -f ensures we match the full command-line “JSBSim” entry you saw
+            subprocess.call(["pkill", "-f", "JSBSim"])
+        except Exception as e:
+            # if pkill isn’t available or fails, at least log it
+            print(f"[Warning] failed to pkill JSBSim: {e}")
+
+    def find_first_file(self, dir_path, in_names):
+        p = Path(dir_path)
+        for f in p.iterdir(): # iterate over entries in the directory
+            if f.is_file():
+                for in_name in in_names:
+                    if in_name in f.name:
+                        return f.name # return the first matching Path object
+        return None  
+
+    def last_segment(self, s: str) -> str:
+        # Remove any trailing slash, then split on "/" and grab the last part
+        return s.rstrip("/").rsplit("/", 1)[-1]
+    
+    def loadmat(self, file_path):
+        try:
+            mat_contents = mat73.loadmat(file_path)
+            use_scipy = False
+            return mat_contents, use_scipy
+        except TypeError as e:
+            mat_contents = scipy.io.loadmat(file_path)
+            use_scipy = True
+            return mat_contents, use_scipy
+
+    def DAA_Modes(self, daa=0, mode=0, bench=0):
+        '''DAA with daa={0:off, 1:on, 2:both}, mode={0:auto, 1:directed} and bench={0:SIL only, 1:bench-test}'''
+        # 1) pull start/end out of the env
+        start = int(os.environ.get('ARDUPLANE_ENC_START', 0))
+        end_env = os.environ.get('ARDUPLANE_ENC_END', None)
+        end = int(end_env) if (end_env is not None and end_env != '') else None
+        daa_ip_in = os.environ.get('ARDUPLANE_DAA_IP', '')
+        intruder_type_in = os.environ.get('ARDUPLANE_INTRUDER_TYPE', 'EO')
+        enc_speedup_in = float(os.environ.get('ARDUPLANE_ENC_SPEEDUP', '1.0'))
+        pilot_latency_in = float(os.environ.get('ARDUPLANE_PILOT_LATENCY', '0.0'))
+        
+        # Load encounter data
+        encounter_folder = os.environ.get('ARDUPLANE_ENCOUNTER', 'Terry Demo')
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+
+        given_mat_file = ".mat" in encounter_folder
+        os_data = None
+        in_data = None
+        use_scipy = False
+        enc_count = None
+        if given_mat_file:
+            encounter_folder = script_dir + '/DAA_Mission/Encounters/{}'.format(encounter_folder)
+            os_data, _ = self.loadmat(encounter_folder)
+            in_data = os_data
+            use_scipy = True
+            enc_count = len(os_data['Timing']['t'][0,0][0])
+        else:
+            encounter_folder = script_dir + '/DAA_Mission/Encounters/{}/'.format(encounter_folder)
+            intruder_file = encounter_folder + self.find_first_file(encounter_folder, ['intruder'])
+            ownship_file = encounter_folder + self.find_first_file(encounter_folder, ['ownship', 'os'])
+            os_data, os_scipy = self.loadmat(ownship_file) #[field][param][idx]
+            in_data, _ = self.loadmat(intruder_file) #[field][param][idx]
+            use_scipy = os_scipy
+            enc_count = len(os_data['ownship_data']['time'])
+
+        
+        test_id = str(int(np.round(60*(time.time()-1735689600)/3600))) + '_' + self.last_segment(encounter_folder) # whole hours*10 since 2025 start
+
+        # 2) loop through encounters
+        # create results home
+        results_home = str(Path.home()) + '/daa_results/'
+        Path(results_home).mkdir(exist_ok=True)
+        # create results file
+        test_results = open(results_home + 'errors-' + test_id + ".csv", "w")
+        if end is None:
+            end = start + 1
+        if end > enc_count:
+            end = enc_count
+        encounter = start
+        test_results.writelines(['Enc Idx,', 'Error Score,', 'DAA ON,', 'Closest Approach 3D,', 
+                                 'HMD,', 'VMD,', 'Closest Approach Time,',
+                                 'n dt Skipped,', 'DAA dt,', 
+                                 'LWC HMD,', 'LWC VMD,', 'LWC Start (s),', 'LWC End (s),', 
+                                 'NMAC HMD,', 'NMAC VMD,', 'NMAC Start (s),', 'NMAC End (s),', 
+                                 'First Guidance Time,', 'First Guidance'
+                                 '\n'])
+        
+        # Decide mode (auto or directed)
+        isDirected = False
+        if (mode == 1): isDirected = True
+        
+        daa_on_off_str = ''
+        print("Running encounters {} to {}".format(start, end))
+        while encounter < end:
+            # DAA Off
+            if (daa == 0 or daa == 2):
+                if bench == 0: # SIL (no external connection)
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim(False, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, pilot_latency_in)
+                    daa_on_off_str = ',DAA OFF,'
+                elif bench == 1: # Bench test, Tracker in encounter sim
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(False, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, True)
+                    daa_on_off_str = ',SFF Sim Tracker,'
+                elif bench == 2: # Bench test, Tracker on SFF
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(False, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, False)
+                    daa_on_off_str = ',SFF Real Tracker,'
+                else:
+                    print("Invalid Mode")
+
+            
+            # DAA On
+            if (daa == 1 or daa == 2):
+                if bench == 0: # SIL (no external connection)
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim(True, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, pilot_latency_in)
+                    daa_on_off_str = ',DAA ON,'
+                elif bench == 1: # Bench test, Tracker in encounter sim
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(True, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, True)
+                    daa_on_off_str = ',SFF Sim Tracker,'
+                elif bench == 2: # Bench test, Tracker on SFF
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(True, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, False)
+                    daa_on_off_str = ',SFF Real Tracker,'
+                else:
+                    print("Invalid Mode")
+                
+            
+            test_results.writelines([str(encounter), ',', str(err_score), daa_on_off_str, str(miss_score[1]), ',', 
+                                     str(miss_score[2]), ',', str(miss_score[3]), ',', str(miss_score[0]), ',', 
+                                     str(skp), ',', str(dt), ',',
+                                     str(lwc_score[0]), ',', str(lwc_score[1]), ',', str(lwc_score[2]), ',', str(lwc_score[3]), ',',
+                                     str(nmac_score[0]), ',', str(nmac_score[1]), ',', str(nmac_score[2]), ',', str(nmac_score[3]), ',',
+                                     str(guidance[0]), ',', guidance[1], ',',
+                                     '\n'])
+            
+            encounter += 1
+        test_results.close()
+
+
+    def DAA_On_Auto(self):
+        """Encounter sim with DAA On in DAA-Auto mode"""
+        self.DAA_Modes(1, 0)
+    
+    def DAA_On_Directed(self):
+        """Encounter sim with DAA On in DAA-Auto mode"""
+        self.DAA_Modes(1, 1)
+    
+    def DAA_Off(self):
+        """Encounter sim with DAA Off (in DAA-Auto mode)"""
+        self.DAA_Modes(0, 0)
+    
+    def DAA_Both_Auto(self):
+        """Encounter sim with DAA On and DAA Off in DAA-Auto mode"""
+        self.DAA_Modes(2, 0)
+    
+    def DAA_Bench_Auto(self):
+        """Encounter sim connected to the SFF in DAA-Auto mode with a simulated tracker"""
+        self.DAA_Modes(1, 0, 1)
+    
+    def DAA_Bench_Directed(self):
+        """Encounter sim connected to the SFF in DAA-Auto mode with a simulated tracker"""
+        self.DAA_Modes(1, 1, 1)
+    
+    def DAA_Bench_Sim_Track(self): # ALIAS OF DAA_Bench_Auto
+        """Encounter sim connected to the SFF in DAA-Auto mode with a simulated tracker"""
+        self.DAA_Modes(1, 0, 1)
+    
+    def DAA_Bench_Real_Track(self):
+        """Encounter sim connected to the SFF in DAA-Auto mode"""
+        self.DAA_Modes(1, 0, 2)
+
+
+    def build_encounter(self, os_data, in_data, encounter_idx, use_scipy):
+        # -- BUILD ENCOUNTER --
+        # - Ownship data -
+        # Read file
+        ownship_mat_data = os_data #[field][param][idx]
+        # Convert to vector of parameter in metric units
+        if use_scipy:
+            ownship_pos = ownship_mat_data['State']['position'][0,0]
+            # offset ownship to 0,0 in North, East
+            initial_ownship_pos = ownship_pos[0]
+            initial_ownship_pos_ne = np.array([initial_ownship_pos[0], initial_ownship_pos[1], 0.0])
+            encounter_offset = np.array((initial_ownship_pos_ne,) * len(ownship_pos))
+            ownship_pos -= encounter_offset
+            # NWU to NEU
+            ownship_pos[:, 1] *= -1.0
+            ownship_mat_data['State']['velocity'][0,0][:, 1] *= -1.0
+            # Pull data
+            n, e, u = zip(*ownship_pos) # NEU, metres
+            ownship_time = ownship_mat_data['Timing']['t'][0,0][0]
+            ownship_east_m_raw = np.array(e)
+            ownship_north_m_raw = np.array(n)
+            ownship_up_m = np.array(u)
+            ownship_speed_m_per_s = np.linalg.norm(ownship_mat_data['State']['velocity'][0,0], axis=1)
+        else:
+            ownship_time = np.squeeze(ownship_mat_data['ownship_data']['time'][encounter_idx][0])
+            ownship_east_m_raw = np.squeeze(ownship_mat_data['ownship_data']['east_ft'][encounter_idx][0]) * 0.3048
+            ownship_north_m_raw = np.squeeze(ownship_mat_data['ownship_data']['north_ft'][encounter_idx][0]) * 0.3048
+            ownship_up_m = np.squeeze(ownship_mat_data['ownship_data']['up_ft'][encounter_idx][0]) * 0.3048
+            ownship_speed_m_per_s = np.squeeze(ownship_mat_data['ownship_data']['speed_ftps'][encounter_idx][0]) * 0.3048
+        
+        # - Align with takeoff dir -
+        enc_initial_hdg = self.vector_to_heading_rad(ownship_east_m_raw[1] - ownship_east_m_raw[0], ownship_north_m_raw[1] - ownship_north_m_raw[0])
+        takeoff_position = [-27.266337, 152.515640, 0.0, 338.4] # lat lon alt hdg (amaroo takeoff north)
+        hdg_takeoff_rad = np.radians(takeoff_position[-1])
+        hdg_rad = hdg_takeoff_rad - enc_initial_hdg # align with takeoff heading & remove enc heading
+        hdg_cos = np.cos(hdg_rad)
+        hdg_sin = np.sin(hdg_rad)
+        # Rotate ownship path
+        ownship_north_m = -ownship_east_m_raw * hdg_sin + ownship_north_m_raw * hdg_cos
+        ownship_east_m = ownship_east_m_raw * hdg_cos + ownship_north_m_raw * hdg_sin
+        
+        # - Intruder data -
+        # Read file
+        intruder_mat_data = in_data #[field][param][idx]
+        # Convert to vector of parameter in metric units
+        if use_scipy:
+            # offset ownship to 0,0 in North, East
+            ownship_pos = ownship_mat_data['State']['position'][0,0]
+            initial_ownship_pos = ownship_pos[0]
+            initial_ownship_pos_ne = np.array([initial_ownship_pos[0], initial_ownship_pos[1], 0.0])
+            encounter_offset = np.array((initial_ownship_pos_ne,) * len(ownship_pos))
+            intruder_pos = intruder_mat_data['Target']['position'][0,0] - encounter_offset
+            # NWU to NEU
+            intruder_pos[:, 1] *= -1.0
+            intruder_mat_data['Target']['velocity'][0,0][:, 1] *= -1.0
+            # Pull data
+            n, e, u = zip(*intruder_pos) # NEU, metres
+            intruder_time = intruder_mat_data['Timing']['t'][0,0][0]
+            intruder_east_m_raw = np.array(e)
+            intruder_north_m_raw = np.array(n)
+            intruder_up_m = np.array(u)
+
+            vs = intruder_mat_data['Target']['velocity'][0,0]
+            intruder_speed_m_per_s = np.linalg.norm(vs, axis=1)
+            intruder_hdg_rad = np.mod(np.arctan2(vs[:, 1], vs[:, 0]), 2*np.pi)
+        else:
+            intruder_time = np.squeeze(intruder_mat_data['intruder_data']['time'][encounter_idx][0])
+            intruder_east_m_raw = np.squeeze(intruder_mat_data['intruder_data']['east_ft'][encounter_idx][0]) * 0.3048
+            intruder_north_m_raw = np.squeeze(intruder_mat_data['intruder_data']['north_ft'][encounter_idx][0]) * 0.3048
+            intruder_up_m = np.squeeze(intruder_mat_data['intruder_data']['up_ft'][encounter_idx][0]) * 0.3048
+            intruder_speed_m_per_s = np.squeeze(intruder_mat_data['intruder_data']['speed_ftps'][encounter_idx][0]) * 0.3048
+            intruder_hdg_rad = np.squeeze(intruder_mat_data['intruder_data']['psi_rad'][encounter_idx][0])
+        
+
+        # Calculate dt
+        target_dt = intruder_time[1] - intruder_time[0]
+        target_freq = 1.0/target_dt
+        enc_len = len(intruder_time)
+        # Calculate the difference in altitude and time
+        intruder_dz = np.diff(intruder_up_m)  # Change in altitude
+        intruder_vz = intruder_dz / target_dt  # Vertical velocity (rate of altitude change)
+        # Rotate intruder path
+        intruder_north_m = -intruder_east_m_raw * hdg_sin + intruder_north_m_raw * hdg_cos
+        intruder_east_m = intruder_east_m_raw * hdg_cos + intruder_north_m_raw * hdg_sin
+        intruder_hdg_rad = intruder_hdg_rad + hdg_rad
+        intruder_u_vec = np.sin(intruder_hdg_rad)  # X component (East)
+        intruder_v_vec = np.cos(intruder_hdg_rad)  # Y component (North)
+        
+        # - Miss Distance -
+        dist_east = ownship_east_m - intruder_east_m
+        dist_north = ownship_north_m - intruder_north_m
+        h_dist = np.sqrt(dist_east**2 + dist_north**2)
+        v_dist = intruder_up_m - ownship_up_m
+        dist = np.sqrt(h_dist * h_dist + v_dist * v_dist)
+        
+        # - Build waypoints -
+        # Measure ownship path length
+        ownship_diff_north = np.diff(ownship_east_m_raw)
+        ownship_diff_east = np.diff(ownship_north_m_raw)
+        ownship_dist = np.sqrt(ownship_diff_north * ownship_diff_north + ownship_diff_east * ownship_diff_east)
+        ownship_path_length = np.sum(ownship_dist)
+        
+        # Sample ownship path
+        waypoint_interval = 100 # metres between waypoints
+        waypoint_count = int(np.round(ownship_path_length / waypoint_interval))
+        step = int(np.floor(len(ownship_east_m) / waypoint_count))
+        sampled_north = ownship_north_m[0::step]
+        sampled_east = ownship_east_m[0::step]
+        sampled_up = ownship_up_m[0::step]
+        
+        # Calculate encounter start position
+        extension = 1000 #1000m extension for extra waypoints
+        hdg_takeoff_cos = np.cos(hdg_takeoff_rad)
+        hdg_takeoff_sin = np.sin(hdg_takeoff_rad)
+        climb_rate = 500 # fpm (500 fpm is a conservative climb rate based on the SITL/JSBSim JabiruJ400e)
+        climb_speed = 100 # kts (100 kts is based on the SITL/JSBSim JabiruJ400e for a conservative cimb range)
+        encounter_start_alt = ownship_up_m[0]
+        encounter_start_time = encounter_start_alt / (climb_rate * 0.3048 / 60) # time (s)
+        encounter_start_downrange = climb_speed * 0.51444 * encounter_start_time + extension
+        encounter_start_position = [encounter_start_downrange * hdg_takeoff_cos, encounter_start_downrange * hdg_takeoff_sin, encounter_start_alt] # [north, east, up]
+        
+        # Build encounter mission
+        encounter_mission = [
+            (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, encounter_start_alt), # [1] mission start, takeoff position
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, encounter_start_position[0], encounter_start_position[1], encounter_start_position[2]), # [2] encounter start position
+        ]
+        
+        enc_wp_pos = []
+        for os_i in range(len(sampled_north)): # ownship mission
+            wp_pos = [encounter_start_position[0] + sampled_north[os_i], encounter_start_position[1] + sampled_east[os_i], sampled_up[os_i]] # rotated to align with takeoff dir
+            enc_wp_pos.append(wp_pos)
+            encounter_mission.append((mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, wp_pos[0], wp_pos[1], wp_pos[2])) #[3..]
+        
+        # - Extra waypoints -
+        # continue waypoint
+        enc_final_vec = np.array([sampled_north[-1] - sampled_north[-2], sampled_east[-1] - sampled_east[-2], sampled_up[-1] - sampled_up[-2]]) #north, east, up
+        enc_final_dir = enc_final_vec / np.linalg.norm(enc_final_vec)
+        continue_pos = enc_wp_pos[-1] + extension * enc_final_dir # rotated to align with takeoff dir
+        encounter_mission.append((mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, continue_pos[0], continue_pos[1], continue_pos[2])) #[3..]
+        
+        # prestart waypoint
+        enc_initial_vec = np.array([sampled_north[1] - sampled_north[0], sampled_east[1] - sampled_east[0], sampled_up[1] - sampled_up[0]]) #north, east, up
+        enc_initial_dir = enc_initial_vec / np.linalg.norm(enc_initial_vec)
+        prestart_pos = enc_wp_pos[0] - extension * enc_initial_dir # rotated to align with takeoff dir
+        encounter_mission[1] = (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, prestart_pos[0], prestart_pos[1], prestart_pos[2])
+        
+        return EncounterGeometry(ownship_time, ownship_north_m, ownship_east_m, ownship_up_m, ownship_speed_m_per_s,
+                     intruder_time, intruder_north_m, intruder_east_m, intruder_up_m, intruder_speed_m_per_s, intruder_hdg_rad, intruder_vz,
+                     h_dist, v_dist, dist,
+                     takeoff_position, encounter_mission, encounter_start_alt, target_dt, enc_len)
+
+    def send_intruder_adsb_to_gcs(self, intruder_lla, heading_deg, ground_speed_mps, vertical_speed_mps, encounter_idx):
+        '''Send the encounter intruder as ADS-B traffic for Mission Planner display.'''
+        flags = (
+            mavutil.mavlink.ADSB_FLAGS_VALID_COORDS |
+            mavutil.mavlink.ADSB_FLAGS_VALID_ALTITUDE |
+            mavutil.mavlink.ADSB_FLAGS_VALID_HEADING |
+            mavutil.mavlink.ADSB_FLAGS_VALID_VELOCITY |
+            mavutil.mavlink.ADSB_FLAGS_VALID_CALLSIGN |
+            mavutil.mavlink.ADSB_FLAGS_VALID_SQUAWK |
+            mavutil.mavlink.ADSB_FLAGS_SIMULATED |
+            mavutil.mavlink.ADSB_FLAGS_VERTICAL_VELOCITY_VALID
+        )
+        icao_address = 0xDAA000 + (int(encounter_idx) & 0x0FFF)
+        callsign = ("INTR%04d" % int(encounter_idx)).encode("ascii")
+        lat = int(float(intruder_lla[0]) * 1e7)
+        lon = int(float(intruder_lla[1]) * 1e7)
+        alt = int(float(intruder_lla[2]) * 1000.0)
+        heading = int(float(heading_deg) * 100.0) % 36000
+        hor_velocity = max(0, int(float(ground_speed_mps) * 100.0))
+        ver_velocity = int(float(vertical_speed_mps) * 100.0)
+
+        try:
+            self.mav.mav.adsb_vehicle_send(
+                icao_address,
+                lat,
+                lon,
+                mavutil.mavlink.ADSB_ALTITUDE_TYPE_GEOMETRIC,
+                alt,
+                heading,
+                hor_velocity,
+                ver_velocity,
+                callsign,
+                mavutil.mavlink.ADSB_EMITTER_TYPE_LIGHT,
+                1,
+                flags,
+                1200
+            )
+        except Exception as e:
+            if not getattr(self, "_daa_adsb_vehicle_warned", False):
+                self.progress("Failed to send intruder ADS-B to ArduPilot: %s" % e)
+                self._daa_adsb_vehicle_warned = True
+
+        try:
+            gcs_ip = netifaces.gateways()['default'][netifaces.AF_INET][0]
+            gcs = getattr(self, "_daa_mission_planner_adsb_out", None)
+            if gcs is None:
+                gcs = mavutil.mavlink_connection(
+                    "udpout:%s:14550" % gcs_ip,
+                    source_system=252,
+                    source_component=191
+                )
+                self._daa_mission_planner_adsb_out = gcs
+            gcs.mav.adsb_vehicle_send(
+                icao_address,
+                lat,
+                lon,
+                mavutil.mavlink.ADSB_ALTITUDE_TYPE_GEOMETRIC,
+                alt,
+                heading,
+                hor_velocity,
+                ver_velocity,
+                callsign,
+                mavutil.mavlink.ADSB_EMITTER_TYPE_LIGHT,
+                1,
+                flags,
+                1200
+            )
+        except Exception as e:
+            if not getattr(self, "_daa_mission_planner_adsb_warned", False):
+                self.progress("Failed to send intruder ADS-B to Mission Planner: %s" % e)
+                self._daa_mission_planner_adsb_warned = True
+
+
+    def encounter_sim(self, daa, isDirected, os_data_in, in_data_in, use_scipy, encounter_idx_in=1, test_id_in='', results_home_in='/home/thoma/daa_results/', daa_ip='', intruder_type='EO', enc_speedup=1.0, pilot_latency_in = 0.0):
+        '''Run an encounter sim with SITL'''
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        _daa_ip = ''
+        if daa_ip == '':
+            _daa_ip = netifaces.gateways()['default'][netifaces.AF_INET][0] # gateway ip address for wsl to listen to windows
+        else:
+            _daa_ip = daa_ip
+        
+        ## ENCOUNTER SETUP
+        initial_lla = None
+        initial_lla_recorded = False
+        daa_client = DaidalusClient(_daa_ip, 65432) # WSL IP
+        avoid_hyst = 5 # hysteresis time in seconds for avoid decisions
+        lwc_h_thresh = 2200 * 0.3048 # these should be actual LWC not the MID region
+        lwc_v_thresh = 450 * 0.3048 # these should be actual LWC not the MID region
+        nmac_h_thresh = 500 * 0.3048
+        nmac_v_thresh = 100 * 0.3048
+        pilot_latency = pilot_latency_in
+
+        daa_label = 'DAA_ON' if daa else 'DAA_OFF'
+        run_label = daa_label
+        if test_id_in != '':
+            run_label += '-' + test_id_in
+        run_results_home = os.path.join(results_home_in, f'{run_label}[{encounter_idx_in}]') + os.sep
+        Path(run_results_home).mkdir(parents=True, exist_ok=True)
+
+        geom = self.build_encounter(os_data_in, in_data_in, encounter_idx_in, use_scipy)
+        enc_log = EncounterSimLogger(daa, test_id_in, run_results_home, encounter_idx_in, geom)
+
+        # np.random.seed(2)
+        tracker_dir = os.path.join(script_dir, "Tracker_and_SUM")
+        tracker = Tracker(ownship_id = "OS1", script_dir=tracker_dir)
+        tracker.plot = True
+        tracker.plot_save_path = os.path.join(run_results_home, f'{run_label}[{encounter_idx_in}]_tracker_spheres.png')
+        enc_this = Encounter(tracker.ownship, script_dir=tracker_dir)
+
+        intruder_type_upper = str.upper(intruder_type)
+        if intruder_type_upper == "EO" or intruder_type_upper == "VISION":
+            traffic_type = 1 # msg_to_hmi_pb2.VISION
+        elif intruder_type_upper == "ADSB":
+            traffic_type = 0 # msg_to_hmi_pb2.ADSB
+        else:
+            traffic_type = 2 # msg_to_hmi_pb2.FUSION
+        
+        ## AUTOTEST START
+        model = 'jsbsim:JabiruJ400e'
+        self.customise_SITL_commandline(
+            ["--home", str(geom.takeoff_position)[1:-1]], # remove '[' and ']'
+            model=model,
+            # defaults_filepath=script_dir + '/DAA_Mission/jabiru-ali.param',
+            defaults_filepath=script_dir + '/DAA_Mission/jab_tune_v1.2.param',
+            wipe=True,
+        )
+        self.set_parameters({
+            "SIM_SPEEDUP": 1000,
+        })
+        self.upload_simple_relhome_mission(geom.mission)
         self.wait_ready_to_arm()
-
         self.arm_vehicle()
+        self.change_mode('AUTO')
+        
+        # # start HMI (Placing this here slowed down the simulation by ~10 fold)
+        # hmi_connection = HMIConnection()
+        # hmi_connection.start_hmi_server()
+        
+        # start mavproxy and add output (for directed mode, and possibly for SFF connection)
+        mavproxy = self.start_mavproxy()
+        
+        # Request messages and rates
+        message_rate = 10.0 #hz
+        msg_req_tries = 0
+        while msg_req_tries < 1000:
+            msg_req_tries += 1
+            try:
+                self.set_message_rate_hz(
+                    33, # GLOBAL_POSITION_INT
+                    message_rate
+                )
+                self.set_message_rate_hz(
+                    30, # ATTITUDE
+                    message_rate
+                )
+                self.set_message_rate_hz(
+                    168, # WIND (168) part of ardupilotmega : WIND_COV (231) is unsupported
+                    message_rate
+                )
+                self.set_message_rate_hz(
+                    36, # SERVO_OUTPUT_RAW (36)
+                    message_rate
+                )
+            except Exception as e:
+                print(f'MESSAGE REQUEST FAILED: {e}')
+                continue
+            break
+        
+        # wait for takeoff / climb
+        self.wait_altitude(geom.encounter_start_alt - 5, geom.encounter_start_alt + 5, relative=True, timeout=3000)
+        _climb_rate = geom.encounter_start_alt / self.get_sim_time() * 196.85
+        self.progress("Climb completed at {} fpm".format(int(_climb_rate)))
+        # calculate equivalent airspeed given desired ground speed
+        mission_density = atmos.Rho(geom.encounter_start_alt)
+        mission_eas = geom.ownship_speed_m_per_s[0] * np.sqrt(mission_density / 1.2250) # assume 0 wind (thus, TAS=groundSpeed)
+        self.set_parameter("AIRSPEED_CRUISE", mission_eas) # command EAS (assume =CAS=IAS)
+        self.progress("Adjusting GS = " + str(geom.ownship_speed_m_per_s[0]) + " to EAS (=CAS=IAS) = " + str(mission_eas))
+        
+        # wait for encounter
+        self.wait_current_waypoint(4, timeout=3000) # wait until on station at encounter start (achieved 3, heading toward 4)
+        
+        # Start encounter sim
+        if isDirected: # Change to FBWA, pilot flies entire encounter
+            self.change_mode('FBWA')
 
-        # check the vehicle is flying to each waypoint as expected
-        self.wait_distance_to_waypoint(2, distance_min=90, distance_max=110, timeout=90) # North East Loiter
-        self.wait_distance_to_waypoint(3, distance_min=90, distance_max=110, timeout=90) # North West Loiter
+        self.progress("Starting an {0} Encounter Sim on {1}".format(traffic_type, daa_ip))
+        self.set_parameters({
+            "SIM_SPEEDUP": enc_speedup,
+            "SIM_WIND_SPD": 0.0,
+            "SIM_WIND_DIR": 0.0
+        })
 
-        # Jump to first 0-Turn Loiter
-        self.wait_distance_to_waypoint(2, distance_min=90, distance_max=110, timeout=90) # North East Loiter
+        mavproxy.send("output add {}:14550\n".format(_daa_ip)) # off-board mission planner
+        mavproxy.send("output add {}:14550\n".format(netifaces.gateways()['default'][netifaces.AF_INET][0])) # local mission planner
+        mavproxy.send("output add {}:14552\n".format(_daa_ip)) # other (e.g. SFF)
+        
+        
+        with daa_client.connect_to_daidalus_server() as daidalus_connection:
+            self.progress("Connected to DAA")
+            encounter_start = self.get_sim_time()
+            last_enc_i = 0
+            last_avoid = 0.0
+            frame_i = 0
+            pilot_guidance_start = 0.0
+            pilot_reacted = False
+            
+            # start HMI
+            hmi_connection = HMIConnection()
+            hmi_connection.start_hmi_server()
 
-        # Ensure we go back through this loiter point
-        self.wait_distance_to_waypoint(3, distance_min=90, distance_max=110, timeout=90) # North West Loiter
+            # Async Daidalus
+            datastore = {
+                # Stores the last updated tracker output state for passing into daidalus
+                'track': {
+                    'processed_ownship_state': None,
+                    'track_items': None,
+                    'state_id': None,
+                },
+                # Daidalus free flag
+                'daidalus_free': True,
+                'daidalus_last_call_state_id': None,
+                'daidalus_input': {},
+                # Stores last daidalus guidance to send to sim
+                'daidalus_out': {
+                    'horizontal_guidance': [],
+                    'altitude_guidance': [],
+                    'horizontal_speed_guidance': [],
+                    'vertical_speed_guidance': [],
+                    'intruders': [],
+                    'suggested_hdir_deg': np.nan,
+                    'suggested_hspd_knot': np.nan,
+                    'suggested_vspd_fpm': np.nan,
+                    'suggested_alt_ft': np.nan,
+                    'timestamp': None
+                },
+                'guidance_consumed': True
+            }
 
-        self.wait_distance_to_waypoint(5, distance_min=10, distance_max=20, timeout=90)  # South West Waypoint
-        self.wait_distance_to_waypoint(6, distance_min=10, distance_max=20, timeout=90)  # South East Waypoint
+            def send_fn(payload: dict) -> dict:
+                return daa_client.send_data2(daidalus_connection, payload)
 
-        self.fly_home_land_and_disarm()
+            ge = Guidance_Thread(send_fn=send_fn, tracker=tracker, datastore=datastore)
+            ge.start()
+            
+            while True:
+                # - Understand Time -
+                sim_time = self.get_sim_time()
+                enc_time = sim_time - encounter_start
+                enc_i = int(enc_time // geom.target_dt) # gives you the most recent encounter time index
+                if enc_i == last_enc_i:
+                    continue #already sampled this timestep
+                if enc_i > geom.enc_len - 2: # maximum index for velocity arrays 1 less than normal (hence len -2)
+                    break #encounter complete, finish autotest
+                i_frac = (enc_time % geom.target_dt) / geom.target_dt # fraction of progression through this timestep (t param for LERP)
+                # Need to use i_frac in all places where enc_i indexes out of the geom. LERP between param[enc_i] and param[enc_i + 1]
+                
+                # - Command Ownship Speed -
+                cmd_gs = geom.lerp(geom.ownship_speed_m_per_s, enc_i, i_frac)
+                self.send_cmd(
+                    mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
+                    mavutil.mavlink.SPEED_TYPE_GROUNDSPEED, # Speed Type
+                    cmd_gs, # Speed
+                    -1, # Throttle
+                    quiet=True
+                )
+                # self.progress("Commanding ground speed = " + str(cmd_gs))
+                
+                
+                # - Ownship State -
+                ownship_position = OwnshipPosition(self.mav.messages['GLOBAL_POSITION_INT'].to_dict(), datetime.datetime.now(datetime.timezone.utc).isoformat())
+                ownship_attitude = self.mav.messages['ATTITUDE'].to_dict()
+                ownship_wind = self.mav.messages['WIND'].to_dict()
+                ownship_servos = self.mav.messages['SERVO_OUTPUT_RAW'].to_dict()
+                ownship_gs = math.sqrt(ownship_position.vx**2 + ownship_position.vy**2)
+
+                roll, pitch, yaw = (np.degrees(ownship_attitude['roll']), np.degrees(ownship_attitude['pitch']), np.degrees(ownship_attitude['yaw']))
+                # print(f"pitch = {pitch} deg, measured = {np.degrees(np.arctan2(ownship_position.vz, ownship_gs))} deg, \nyaw = {yaw} deg, measured = {ownship_position.hdg} deg")
+
+                ownship_state = {
+                    "lat": ownship_position.lat,
+                    "lon": ownship_position.lon,
+                    "alt": ownship_position.alt,
+                    "trk": ownship_position.hdg,
+                    "ground_speed":ownship_gs,
+                    "vertical_speed": ownship_position.vz,
+                    "time": enc_time,
+                    "rl": roll,
+                    "pt": pitch,
+                    "yw": yaw,
+                    "wind_dir": ownship_wind['direction'],
+                    "wind_spd": ownship_wind['speed']
+                }
+                
+                if not initial_lla_recorded:
+                    initial_lla = (ownship_position.lat, ownship_position.lon, ownship_position.alt)
+                    initial_lla_recorded = True
+                
+                # self.progress("rl = {}, pt = {}, yw = {}".format(ownship_state["rl"], ownship_state["pt"], ownship_state["yw"]))
+                # self.progress("yaw = {}, trk = {}".format(ownship_attitude['yaw'], ownship_position.hdg))
+                # self.progress("wind_dir = {}, wind_spd = {}".format(ownship_state["wind_dir"], ownship_state["wind_spd"]))
+
+                
+                
+                # - Intruder State -
+                # Interpolation
+                intr_hdg = float(geom.lerp(geom.intruder_hdg_rad, enc_i, i_frac))
+                intr_north = float(geom.lerp(geom.intruder_north_m, enc_i, i_frac))
+                intr_east = float(geom.lerp(geom.intruder_east_m, enc_i, i_frac))
+                intr_up = float(geom.lerp(geom.intruder_up_m, enc_i, i_frac))
+                intr_vz = float(geom.lerp(geom.intruder_vz, enc_i, i_frac))
+                intr_speed = float(geom.lerp(geom.intruder_speed_m_per_s, enc_i, i_frac))
+                intr_dist = float(geom.lerp(geom.dist, enc_i, i_frac))
+
+                intruder_heading_deg = float(np.degrees(intr_hdg))
+                intruder_heading_deg = (intruder_heading_deg + 360) % 360
+                intruder_lla = navpy.ned2lla([intr_north, intr_east, 0.0], initial_lla[0], initial_lla[1], 0.0) # don't use altitude, NED will fuck it up
+                intruder_lla = np.array([intruder_lla[0], intruder_lla[1], intr_up]) # overwrite intruder alt (don't change it based on reference position)
+                intruder_ver_vel = float(intr_vz)
+                intruder_hor_vel = float(intr_speed)
+
+                # EO Intruder
+                eo_intruders = []
+
+                if traffic_type == 1 or traffic_type == 2: # EO / VISION or FUSION
+                    intruder_state = {
+                        "lat": intruder_lla[0],
+                        "lon": intruder_lla[1],
+                        "alt": intruder_lla[2],
+                        "trk": intruder_heading_deg,
+                        "ground_speed": intruder_hor_vel,
+                        "vertical_speed": intruder_ver_vel,
+                        "type": traffic_type,
+                        "callsign": "INTRUDER",
+                        "id": str(enc_log.encounter_idx),
+                        "time": enc_time
+                    }
+                    eo_intruders.append(intruder_state)
+                
+                # ADSB Intruders
+                adsb_intruders = [] # Generate mock ADS-B traffic data based on intruder format (can convert ADSB to this format)
+                
+                if traffic_type == 0 or traffic_type == 2: # ADSB or FUSION
+                    traffic = {
+                            "lat": intruder_lla[0],
+                            "lon": intruder_lla[1],
+                            "alt": intruder_lla[2], # add North, East, Up for SUM (as 'x', 'y', 'z')
+                            "trk": intruder_heading_deg,
+                            "north_m": intr_north,
+                            "east_m": intr_east,
+                            "ground_speed": intruder_hor_vel,
+                            "vertical_speed": intruder_ver_vel,
+                            "type": traffic_type,
+                            "callsign": "INTRUDER",
+                            "id": str(enc_log.encounter_idx),
+                            "time": enc_time,
+                            "NIC": 8,
+                            "NACp": 9
+                            # "coord_frame": coord_frame,
+                            # "centered": centered,
+                            # "aligned": aligned
+                        }
+                    adsb_intruders.append(traffic)
+                    self.send_intruder_adsb_to_gcs(
+                        intruder_lla,
+                        intruder_heading_deg,
+                        intruder_hor_vel,
+                        intruder_ver_vel,
+                        enc_log.encounter_idx
+                    )
+
+                ### <SUM ############################################################################################################
+
+                synthetic_ownship_mavlink_position, synthetic_ownship_mavlink_attitude = enc_this.get_ownship_mavlink_format(ownship_state) # log this (ground truth)
+                synthetic_detector_output = enc_this.process_synthetic_data(frame_i, tracker.ownship, ownship_state, eo_intruders, initial_lla) # log this
+
+                ### SUM> / <TRACKER ############################################################################################################
+                processed_ownship_state = tracker.process_ownship_state(synthetic_ownship_mavlink_position, synthetic_ownship_mavlink_attitude)
+
+                # Get the hash of the latest airspace picture (ownship + intruders) state
+                airspace_state_id = state_id_fingerprint([processed_ownship_state, synthetic_detector_output, adsb_intruders])
+
+                skip_tracker = airspace_state_id == datastore['track']['state_id']
+                if not skip_tracker:
+                    # Update tracker for updated airspace
+                    new_track_points, all_current_intruder_tracks, deleted_track_ids = tracker.update_tracks_v3(processed_ownship_state, synthetic_detector_output, adsb_intruders) # log this
+
+                    # Extract kalman filtered ownship state
+                    new_tracked_ownship_state = new_track_points.pop("Ownship", {})
+
+                    # Update ownship state if new ownship object returned (aka. new ownship telemetry ingested)
+                    if new_tracked_ownship_state:
+                        tracked_ownship_state = new_tracked_ownship_state
+                    else:
+                        tracked_ownship_state = copy.deepcopy(datastore['track']['processed_ownship_state'])
+
+                    datastore['track'] = {
+                        'processed_ownship_state': tracked_ownship_state,
+                        'track_items': new_track_points,
+                        'state_id': airspace_state_id,
+                    }
+
+                    # Check if the last daidalus output included guidance
+                    last_daidalus_response_object = copy.deepcopy(datastore['daidalus_out'])
+                    guidance_in_last_daidalus_object = (
+                        last_daidalus_response_object['suggested_hdir_deg'] is not None and np.isfinite(last_daidalus_response_object['suggested_hdir_deg']) or
+                        last_daidalus_response_object['suggested_hspd_knot'] is not None and np.isfinite(last_daidalus_response_object['suggested_hspd_knot']) or
+                        last_daidalus_response_object['suggested_vspd_fpm'] is not None and np.isfinite(last_daidalus_response_object['suggested_vspd_fpm']) or
+                        last_daidalus_response_object['suggested_alt_ft'] is not None and np.isfinite(last_daidalus_response_object['suggested_alt_ft'])
+                    )
+
+                    # Update daidalus input object if:
+                    # (1) intruder tracks update or 
+                    # (2) ownship track updates and there exist intruders or 
+                    # (3) if tracks deleted and the last call included guidance (since this may eliminate guidance)
+                    if (
+                        new_track_points
+                        or (new_tracked_ownship_state and all_current_intruder_tracks)
+                        or (deleted_track_ids and guidance_in_last_daidalus_object)
+                        ):
+                        # If the last daidalus guidance output was not empty, reset iterations from last guidance to zero
+                        # This is done inside this block since we want an iteration to be whenever the airspace changes and we make a new daidalus object
+                        # rather than an iteration of the thread, which is arbitrary and much faster
+                        for track_id_this in tracker.iso_decomp_guidance_hist:
+                            for daidalus_track_response in last_daidalus_response_object['intruders']:
+                                if str(daidalus_track_response['id']) == str(track_id_this):
+                                    if daidalus_track_response['alert_level'] > 0:
+                                        tracker.iso_decomp_guidance_hist[track_id_this]['iters_since_guidance'] = 0
+                                    else:
+                                        tracker.iso_decomp_guidance_hist[track_id_this]['iters_since_guidance'] += 1
+
+                        daidalus_input = tracker.create_daidalus_input(tracked_ownship_state, all_current_intruder_tracks)
+                        datastore['daidalus_input'] = daidalus_input
+
+                ### TRACKER> ############################################################################################################
+                rtrn_daidalus = copy.deepcopy(datastore['daidalus_input'])
+                rtrn_track_items = copy.deepcopy(datastore['track']['track_items'])
+
+                if rtrn_track_items:
+                    enc_log._in_pos_detected.append(list(rtrn_track_items.values())[0]['abs_cartesian_x_y_z'][:3])
+                    enc_log._in_pos_smoothed.append(list(rtrn_track_items.values())[0]['abs_cartesian_x_y_z_smoothed'])
+
+                ### <DECIDE #########################################################################################################
+                if rtrn_daidalus:
+                    # Get the hash of the latest daidalus_input object
+                    daidalus_input_state_id = state_id_fingerprint(daidalus_input)
+
+                    # Only make daidalus call if daidalus input has changed from the last call
+                    skip_daidalus = daidalus_input_state_id == datastore['daidalus_last_call_state_id']
+
+                    if not skip_daidalus and datastore['daidalus_free']: # Only feed latest track state into daidalus if it's free
+                        datastore['daidalus_last_call_state_id'] = daidalus_input_state_id
+                        ge.submit(daidalus_input)
+
+                ### DECIDE> #########################################################################################################
+                rtrn_response = copy.deepcopy(datastore['daidalus_out']) # updated in async daidalus
+                rtrn_guidance_consumed = copy.deepcopy(datastore['guidance_consumed'])
+
+                
+                # - Command -
+                if daa and not rtrn_guidance_consumed:
+                # Pull data from current datastate instead of the output this iteration to mimic async loop architecture
+                    suggestedHeading = rtrn_response['suggested_hdir_deg']
+                    # suggestedAltitude = rtrn_response['suggested_alt_ft']
+                    suggestedAltitude = np.nan # altitude guidance disabled
+                    
+                    hdg_nan = not np.isfinite(suggestedHeading)
+                    alt_nan = not np.isfinite(suggestedAltitude)
+                    guide_nan = hdg_nan and alt_nan
+
+                    # - Calculate avoid position -
+                    if not guide_nan:
+                        enc_log._guidance_count += 1
+                    
+                    avoid = False
+                    avoidLat = float('nan')
+                    avoidLon = float('nan')
+                    avoidAlt = float('nan')
+                    
+                    # Position (Lat/Lon)
+                    if not hdg_nan:
+                        avoidLatLon = self.get_point_at_distance(ownship_state["lat"], ownship_state["lon"], 20.0, suggestedHeading) # 2km distance
+                        avoidLat = avoidLatLon[0]
+                        avoidLon = avoidLatLon[1]
+                        avoid = True # comply with suggested
+                    else:
+                        # maintain heading (perhaps there's a suggested altitude change)
+                        avoidLatLon = self.get_point_at_distance(ownship_state["lat"], ownship_state["lon"], 20.0, ownship_state["trk"]) # 2km distance
+                        avoidLat = avoidLatLon[0]
+                        avoidLon = avoidLatLon[1]
+                        # avoid not necessarily executed
+                    
+                    # Altitude
+                    if not alt_nan:
+                        avoidAlt = suggestedAltitude * 0.3048 # convert ft to metres
+                        avoid = True # comply with suggested
+                    else:
+                        avoidAlt = ownship_state["alt"] # maintain altitude (perhaps there's a heading change)
+                        # avoid not necessarily executed
+                    
+                    # record first (not nan) suggested guidance
+                    if not enc_log._first_guided and not guide_nan:
+                        enc_log._first_guidance = [enc_time, str(rtrn_response)]
+                        enc_log._first_guided = True
+                    
+
+                    # Pilot reaction time (assume reaction time occurs once, upon first receipt of suggested guidance, they are now alert and follow live)
+                    if not pilot_reacted and avoid:
+                        pilot_reacted = True
+                        pilot_guidance_start = enc_time
+                    
+                    # - Command -
+                    command_hyst = enc_time > last_avoid + avoid_hyst
+                    pilot_hyst = pilot_reacted and enc_time > pilot_guidance_start + pilot_latency
+                    if command_hyst and pilot_hyst:
+                        if avoid:
+                            if not isDirected:
+                                self.send_cmd_int(
+                                    mavutil.mavlink.MAV_CMD_DO_REPOSITION,
+                                    0, #p1 Ground speed, less than 0 (-1) for default
+                                    mavutil.mavlink.MAV_DO_REPOSITION_FLAGS_CHANGE_MODE, #p2 Bitmask of option flags
+                                    0, #p3 Loiter radius for planes
+                                    0, #p4 For planes indicates loiter direction (0: clockwise, 1: counter clockwise)
+                                    int(avoidLat*1e7), # lat* 1e7
+                                    int(avoidLon*1e7), # lon* 1e7
+                                    avoidAlt,
+                                    quiet=True
+                                )
+                            last_avoid = enc_time
+                            # self.progress("Avoid initiated! Moving to (LLA): " + str(avoidLat) + ", " + str(avoidLon) + ", " + str(avoidAlt))
+                            
+                            # Plotting
+                            _avoid_ned = navpy.lla2ned(avoidLat, avoidLon, avoidAlt, initial_lla[0], initial_lla[1], 0.0) # reference altitude should be zero, not encounter mission alt
+                            _avoid_ned[2] *= -1.0 # convert down to altitude
+                            enc_log._avoids.append(_avoid_ned)
+                            
+                        else: # not avoid
+                            if not self.mode_is("AUTO", cached=True):
+                                pass
+                                # self.change_mode("AUTO")
+                                # self.progress("Rejoin started")
+                                # _rejoins_i.append(_debug_i)
+                    # } command_hyst
+                # } if daidalus
+                
+                
+                # - Send HMI Message -
+                # !!! CONVERTING TO MATHMATICIAN STANDARD of x, y, z : East, North, Up for use by the HMI
+                system_status = {
+                    "component_id": "System",
+                    "status": statuses_updates_pb2.OPERATIONAL,
+                    "message": "System is operational",
+                    "timestamp": int(enc_time * 1000)
+                }
+                ownship = {
+                    "id": "ownship",
+                    "is_active": True,
+                    "s": {"lat": ownship_position.lat, "lon": ownship_position.lon, "alt": ownship_position.alt},
+                    "v": {"x": ownship_position.vy, # east
+                          "y": ownship_position.vx, # north
+                          "z": ownship_position.vz}, # up
+                    "wind": {"speed": ownship_wind['speed'],
+                             "direction": ownship_wind['direction']}
+                }
+                traffic = {
+                    "id": "1",
+                    "is_active": True,
+                    "s": {"lat": intruder_lla[0], "lon": intruder_lla[1], "alt": intruder_lla[2]},
+                    "v": {"x": intr_speed * np.sin(intr_hdg), # east
+                          "y": intr_speed * np.cos(intr_hdg), # north
+                          "z": intr_vz}, # up
+                    "t_type": traffic_type,
+                    "bounding_box": {
+                        "image_data": b"", # Placeholder for image data
+                        "timestamp": int(enc_time * 1000)
+                    }
+                }
+                if isDirected:
+                    ctrl_mode = 3
+                else:
+                    ctrl_mode = 4
+                controller_mode = {
+                    "mode" : ctrl_mode 
+                }
+                daidalus = self.guidance_to_grpc(rtrn_response)
+                hmi_connection.update_hmi_data(ownship, [traffic], daidalus, system_status, controller_mode)
+                
+                
+                # - Encounter Metrics -
+                h_dist_to_intruder = self.distance(ownship_state["lat"], ownship_state["lon"], intruder_lla[0], intruder_lla[1])
+                v_dist_to_intruder = intruder_lla[2] - ownship_state["alt"]
+                dist_to_intruder = np.sqrt(h_dist_to_intruder * h_dist_to_intruder + v_dist_to_intruder * v_dist_to_intruder)
+                if dist_to_intruder < enc_log._closest_approach:
+                    enc_log._closest_approach = dist_to_intruder
+                    enc_log._tcpa = enc_time
+                    enc_log._closest_i = enc_log._debug_i
+                # self.progress("Distance to intruder = " + str(dist_to_intruder) + "m , closest approach = " + str(closest_approach) + "m at " + str(tcpa))
+                
+                # Loss of Well Clear metrics
+                lwc_h = h_dist_to_intruder < lwc_h_thresh
+                lwc_v = v_dist_to_intruder < lwc_v_thresh
+                lwc = lwc_h and lwc_v
+                if lwc:
+                    enc_log._lwc_is.append(enc_log._debug_i)
+                    if h_dist_to_intruder < enc_log._lwc_hmd: # update minimum lwc hmd
+                        enc_log._lwc_hmd = h_dist_to_intruder
+                    if v_dist_to_intruder < enc_log._lwc_vmd: # update minimum lwc vmd
+                        enc_log._lwc_vmd = v_dist_to_intruder
+
+                # Near Mid Air Collision metrics
+                nmac_h = h_dist_to_intruder < nmac_h_thresh
+                nmac_v = v_dist_to_intruder < nmac_v_thresh
+                nmac = nmac_h and nmac_v
+                if nmac:
+                    enc_log._nmac_is.append(enc_log._debug_i)
+                    if h_dist_to_intruder < enc_log._nmac_hmd: # update minimum nmac hmd
+                        enc_log._nmac_hmd = h_dist_to_intruder
+                    if v_dist_to_intruder < enc_log._nmac_vmd: # update minimum nmac vmd
+                        enc_log._nmac_vmd = v_dist_to_intruder
+                
+                
+                #debug plotting
+                os_ned = navpy.lla2ned(ownship_position.lat, ownship_position.lon, ownship_position.alt, initial_lla[0], initial_lla[1], 0.0) # reference altitude should be zero, not encounter mission alt
+                os_nea = np.array([os_ned[0], os_ned[1], ownship_position.alt]) # overwrite altitude
+                enc_log._os_pos.append(os_nea)
+                enc_log._os_hdg_rad.append(np.radians(ownship_position.hdg))
+                enc_log._in_pos.append([intr_north, intr_east, intr_up])
+                enc_log._in_hdg_rad.append(intr_hdg)
+                enc_log._hmd.append(h_dist_to_intruder)
+                enc_log._vmd.append(v_dist_to_intruder)
+                enc_log._md.append(dist_to_intruder)
+                enc_log._dist.append(intr_dist)
+                enc_log._times.append(enc_time)
+                enc_log._os_spd.append(ownship_gs)
+                enc_log._os_vspd.append(ownship_position.vz)
+                enc_log._in_spd.append(intruder_hor_vel)
+                enc_log._in_vspd.append(intruder_ver_vel)
+                enc_log._guidance_counts.append(enc_log._guidance_count)
+                enc_log._skip_count += (enc_i - last_enc_i) - 1 # expect 1 (so subtract it)
+                enc_log._roll_outs.append(ownship_servos['servo1_raw'])
+                enc_log._pitch_outs.append(ownship_servos['servo2_raw'])
+                enc_log._throttle_outs.append(ownship_servos['servo3_raw'])
+                enc_log._yaw_outs.append(ownship_servos['servo4_raw'])
+                enc_log._pitch_rad.append(ownship_attitude['pitch'])
+                enc_log._roll_rad.append(ownship_attitude['roll'])
+                enc_log._yaw_rad.append(ownship_attitude['yaw'])
+                enc_log._pitch_rate_rad.append(ownship_attitude['pitchspeed'])
+                enc_log._roll_rate_rad.append(ownship_attitude['rollspeed'])
+                enc_log._yaw_rate_rad.append(ownship_attitude['yawspeed'])
+                enc_log._last_guidances.append(last_avoid)
+                enc_log._daidalus_os.append(str(rtrn_daidalus.get('o', '')))
+                enc_log._daidalus_in.append(str(rtrn_daidalus.get('d', '')))
+                enc_log._daidalus_response.append(str(rtrn_response))
+                enc_log._daidalus_times.append(-1.0)
+                enc_log._detections.append(str(synthetic_detector_output))
+                enc_log._tracks.append(str(new_track_points))
+                enc_log._lwcs.append(lwc)
+                enc_log._nmacs.append(nmac)
+                
+                # - Next Timestep -
+                # self.delay_sim_time(enc_i_frac * target_dt) # minus daa_time
+                
+                last_enc_i = enc_i
+                enc_log._debug_i += 1
+                frame_i += 1
+                
+                
+                # } if
+            # } while
+            hmi_connection.stop_hmi_server()
+            
+            if getattr(tracker, 'fused_xy_fig', None) is not None:
+                tracker_plot_path = os.path.join(run_results_home, f'{run_label}[{encounter_idx_in}]_tracker_spheres.png')
+                tracker.save_tracker_plot(tracker_plot_path, dpi=300)
+                self.progress(f'Saved tracker sphere plot to {tracker_plot_path}')
+
+            err_score, miss_score, _skip_count, dt_avg, lwc_score, nmac_score, first_guidance = enc_log.do_output()
+            
+        # } with
+        self.stop_mavproxy(mavproxy)
+        self.disarm_vehicle(force=True)
+        return err_score, miss_score, _skip_count, dt_avg, lwc_score, nmac_score, first_guidance
+
+
+    def encounter_sim_sff(self, daa, isDirected, os_data_in, in_data_in, use_scipy, encounter_idx_in=1, test_id_in='', results_home_in='/home/thoma/daa_results/', daa_ip='', intruder_type='EO', enc_speedup=1.0, sim_tracker=False):
+        '''Run an encounter sim with SITL, connected to the SFF for bench testing'''
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        _daa_ip = ''
+        if daa_ip == '':
+            print("No DAA IP given")
+            return
+        else:
+            _daa_ip = daa_ip
+        
+        ## ENCOUNTER SETUP
+        initial_lla = None
+        initial_lla_recorded = False
+        sum_client_port = 65434
+        sum_client = SUMClient(_daa_ip, sum_client_port)
+        lwc_h_thresh = 2200 * 0.3048 # these should be actual LWC not the MID region
+        lwc_v_thresh = 250 * 0.3048 # these should be actual LWC not the MID region
+
+        daa_label = 'DAA_ON' if daa else 'DAA_OFF'
+        run_label = daa_label
+        if test_id_in != '':
+            run_label += '-' + test_id_in
+        run_results_home = os.path.join(results_home_in, f'{run_label}[{encounter_idx_in}]') + os.sep
+        Path(run_results_home).mkdir(parents=True, exist_ok=True)
+
+        geom = self.build_encounter(os_data_in, in_data_in, encounter_idx_in, use_scipy)
+        enc_log = EncounterSimLogger(daa, test_id_in, run_results_home, encounter_idx_in, geom)
+        
+        tracker_dir = os.path.join(script_dir, "Tracker_and_SUM")
+        tracker = Tracker(ownship_id = "OS1", script_dir=tracker_dir)
+        tracker.plot = True
+        tracker.plot_save_path = os.path.join(run_results_home, f'{run_label}[{encounter_idx_in}]_tracker_spheres.png')
+        enc_this = Encounter(tracker.ownship, script_dir=tracker_dir)
+
+        intruder_type_upper = str.upper(intruder_type)
+        if intruder_type_upper == "EO" or intruder_type_upper == "VISION":
+            traffic_type = 1 # msg_to_hmi_pb2.VISION
+        elif intruder_type_upper == "ADSB":
+            traffic_type = 0 # msg_to_hmi_pb2.ADSB
+        else:
+            traffic_type = 2 # msg_to_hmi_pb2.FUSION
+
+        ## AUTOTEST START
+        model = 'jsbsim:JabiruJ400e'
+        self.customise_SITL_commandline(
+            ["--home", str(geom.takeoff_position)[1:-1]], # remove '[' and ']'
+            model=model,
+            # defaults_filepath=script_dir + '/DAA_Mission/jabiru-ali.param',
+            defaults_filepath=script_dir + '/DAA_Mission/jab_tune_v1.2.param',
+            wipe=True,
+        )
+        self.set_parameters({
+            "SIM_SPEEDUP": 1000,
+        })
+        self.upload_simple_relhome_mission(geom.mission)
+        self.wait_ready_to_arm()
+        self.arm_vehicle()
+        self.change_mode('AUTO')
+        
+        # start mavproxy and add output (for directed mode, and possibly for SFF connection)
+        mavproxy = self.start_mavproxy()
+        
+        # connect to SFF
+        self.progress("Connecting to SFF on {}:{}".format(_daa_ip, sum_client_port))
+        sff = None
+        if not _daa_ip == "dry":
+            sff = sum_client.connect_to_SUM_server()
+        
+        # wait for takeoff / climb
+        self.wait_altitude(geom.encounter_start_alt - 5, geom.encounter_start_alt + 5, relative=True, timeout=3000)
+        _climb_rate = geom.encounter_start_alt / self.get_sim_time() * 196.85
+        self.progress("Climb completed at {} fpm".format(int(_climb_rate)))
+        # calculate equivalent airspeed given desired ground speed
+        mission_density = atmos.Rho(geom.encounter_start_alt)
+        mission_eas = geom.ownship_speed_m_per_s[0] * np.sqrt(mission_density / 1.2250) # assume 0 wind (thus, TAS=groundSpeed)
+        self.set_parameter("AIRSPEED_CRUISE", mission_eas) # command EAS (assume =CAS=IAS)
+        self.progress("Adjusting GS = " + str(geom.ownship_speed_m_per_s[0]) + " to EAS (=CAS=IAS) = " + str(mission_eas))
+        
+        # wait for encounter
+        self.wait_current_waypoint(4, timeout=3000) # wait until on station at encounter start (achieved 3, heading toward 4)
+        
+        # Start encounter sim
+        self.progress("Starting an {0} Encounter Sim on {1}".format(intruder_type, daa_ip))
+        self.set_parameters({
+            "SIM_SPEEDUP": enc_speedup,
+            "SIM_WIND_SPD": 0.0,
+            "SIM_WIND_DIR": 0.0
+        })
+
+        mavproxy.send("output add {}:14550\n".format(_daa_ip)) # off-board mission planner
+        mavproxy.send("output add {}:14550\n".format(netifaces.gateways()['default'][netifaces.AF_INET][0])) # local mission planner
+        mavproxy.send("output add {}:14552\n".format(_daa_ip)) # other (e.g. SFF)
+
+        if isDirected: # Change to FBWA, pilot flies entire encounter
+            self.change_mode('FBWA')
+        
+        encounter_start = self.get_sim_time()
+        last_enc_i = 0
+        frame_i = 0
+        while True:
+            # - Understand Time -
+            sim_time = self.get_sim_time()
+            enc_time = sim_time - encounter_start
+            enc_i = int(enc_time // geom.target_dt) # gives you the most recent encounter time index
+            if enc_i == last_enc_i:
+                continue #already sampled this timestep
+            if enc_i > geom.enc_len - 2: # maximum index for velocity arrays 1 less than normal (hence len -2)
+                break #encounter complete, finish autotest
+            i_frac = (enc_time % geom.target_dt) / geom.target_dt # fraction of progression through this timestep (t param for LERP)
+            # Need to use i_frac in all places where enc_i indexes out of the geom. LERP between param[enc_i] and param[enc_i + 1]
+            
+            # - Command Ownship Speed -
+            cmd_gs = geom.lerp(geom.ownship_speed_m_per_s, enc_i, i_frac)
+            self.send_cmd(
+                mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
+                mavutil.mavlink.SPEED_TYPE_GROUNDSPEED, # Speed Type
+                cmd_gs, # Speed
+                -1, # Throttle
+                quiet=True
+            )
+            # self.progress("Commanding ground speed = " + str(cmd_gs))
+            
+            
+            # - Ownship State -
+            ownship_position = OwnshipPosition(self.mav.messages['GLOBAL_POSITION_INT'].to_dict(), datetime.datetime.now(datetime.timezone.utc).isoformat())
+            ownship_attitude = self.mav.messages['ATTITUDE'].to_dict()
+            ownship_wind = self.mav.messages['WIND'].to_dict()
+            ownship_servos = self.mav.messages['SERVO_OUTPUT_RAW'].to_dict()
+            ownship_gs = math.sqrt(ownship_position.vx**2 + ownship_position.vy**2)
+            
+            roll, pitch, yaw = (np.degrees(ownship_attitude['roll']), np.degrees(ownship_attitude['pitch']), np.degrees(ownship_attitude['yaw']))
+
+            ownship_state = {
+                "lat": ownship_position.lat,
+                "lon": ownship_position.lon,
+                "alt": ownship_position.alt,
+                "trk": ownship_position.hdg,
+                "ground_speed":ownship_gs,
+                "vertical_speed": ownship_position.vz,
+                "time": enc_time,
+                "rl": roll,
+                "pt": pitch,
+                "yw": yaw,
+                "wind_dir": ownship_wind['direction'],
+                "wind_spd": ownship_wind['speed']
+            }
+            
+            if not initial_lla_recorded:
+                initial_lla = (ownship_position.lat, ownship_position.lon, ownship_position.alt)
+                initial_lla_recorded = True
+            
+            # - Intruder State -
+            # Interpolation
+            intr_hdg = float(geom.lerp(geom.intruder_hdg_rad, enc_i, i_frac))
+            intr_north = float(geom.lerp(geom.intruder_north_m, enc_i, i_frac))
+            intr_east = float(geom.lerp(geom.intruder_east_m, enc_i, i_frac))
+            intr_up = float(geom.lerp(geom.intruder_up_m, enc_i, i_frac))
+            intr_vz = float(geom.lerp(geom.intruder_vz, enc_i, i_frac))
+            intr_speed = float(geom.lerp(geom.intruder_speed_m_per_s, enc_i, i_frac))
+            intr_dist = float(geom.lerp(geom.dist, enc_i, i_frac))
+
+            intruder_heading_deg = float(np.degrees(intr_hdg))
+            intruder_heading_deg = (intruder_heading_deg + 360) % 360
+            intruder_lla = navpy.ned2lla([intr_north, intr_east, 0.0], initial_lla[0], initial_lla[1], 0.0) # don't use altitude, NED will fuck it up
+            intruder_lla = np.array([intruder_lla[0], intruder_lla[1], intr_up]) # overwrite intruder alt (don't change it based on reference position)
+            intruder_ver_vel = float(intr_vz)
+            intruder_hor_vel = float(intr_speed)
+
+            # EO Intruder
+            eo_intruders = []
+
+            if traffic_type == 1 or traffic_type == 2: # EO / VISION or FUSION
+                intruder_state = {
+                    "lat": intruder_lla[0],
+                    "lon": intruder_lla[1],
+                    "alt": intruder_lla[2],
+                    "trk": intruder_heading_deg,
+                    "ground_speed": intruder_hor_vel,
+                    "vertical_speed": intruder_ver_vel,
+                    "type": traffic_type,
+                    "callsign": "INTRUDER",
+                    "id": str(enc_log.encounter_idx),
+                    "time": enc_time
+                }
+                eo_intruders.append(intruder_state)
+            
+            # ADSB Intruders
+            adsb_intruders = [] # Generate mock ADS-B traffic data based on intruder format (can convert ADSB to this format)
+            
+            if traffic_type == 0 or traffic_type == 2: # ADSB or FUSION
+                traffic = {
+                        "lat": intruder_lla[0],
+                        "lon": intruder_lla[1],
+                        "alt": intruder_lla[2], # add North, East, Up for SUM (as 'x', 'y', 'z')
+                        "trk": intruder_heading_deg,
+                        "north_m": intr_north,
+                        "east_m": intr_east,
+                        "ground_speed": intruder_hor_vel,
+                        "vertical_speed": intruder_ver_vel,
+                        "type": traffic_type,
+                        "callsign": "INTRUDER",
+                        "id": str(enc_log.encounter_idx),
+                        "time": enc_time,
+                        "NIC": 8,
+                        "NACp": 9
+                        # "coord_frame": coord_frame,
+                        # "centered": centered,
+                        # "aligned": aligned
+                    }
+                adsb_intruders.append(traffic)
+
+            ### SUM ############################################################################################################
+
+            synthetic_ownship_mavlink_position, synthetic_ownship_mavlink_attitude = enc_this.get_ownship_mavlink_format(ownship_state) # log this (ground truth)
+            synthetic_detector_output = enc_this.process_synthetic_data(frame_i, tracker.ownship, ownship_state, eo_intruders, initial_lla) # log this
+            
+            ### Tracker ############################################################################################################
+            in_pos = [geom.intruder_north_m[enc_i], geom.intruder_east_m[enc_i], geom.intruder_up_m[enc_i]]
+            if sim_tracker:
+                # Tracker is here
+                processed_ownship_state = tracker.process_ownship_state(synthetic_ownship_mavlink_position, synthetic_ownship_mavlink_attitude)
+                new_track_points = tracker.update_tracks_v3(synthetic_detector_output, adsb_intruders=adsb_intruders)
+
+                # - Send SFF -
+                if new_track_points:
+                    daidalus_input = tracker.create_daidalus_input(processed_ownship_state, new_track_points)
+                    daidalus_intruders = daidalus_input.get("d", [])
+                    if daidalus_intruders:
+                        daidalus_input["d"][0]["ty"] = traffic_type
+                    self.progress(str(daidalus_input.keys()))
+                    self.progress(str(daidalus_input))
+                    if sff:
+                        sum_client.send_daidalus_data(sff, daidalus_input)
+
+                    enc_log._in_pos_detected.append(list(new_track_points.values())[0]['abs_cartesian_x_y_z'][:3])
+                    enc_log._in_pos_smoothed.append(list(new_track_points.values())[0]['abs_cartesian_x_y_z_smoothed'])
+            else:
+                # Tracker is on SFF
+                if sff:
+                    sum_client.send_detection(sff, synthetic_detector_output, synthetic_ownship_mavlink_position, synthetic_ownship_mavlink_attitude)
+
+                enc_log._in_pos_detected.append(in_pos)
+                enc_log._in_pos_smoothed.append(in_pos)
+            
+            
+            
+            # - Encounter Metrics -
+            h_dist_to_intruder = self.distance(ownship_state["lat"], ownship_state["lon"], intruder_lla[0], intruder_lla[1])
+            v_dist_to_intruder = intruder_lla[2] - ownship_state["alt"]
+            dist_to_intruder = np.sqrt(h_dist_to_intruder * h_dist_to_intruder + v_dist_to_intruder * v_dist_to_intruder)
+            if dist_to_intruder < enc_log._closest_approach:
+                enc_log._closest_approach = dist_to_intruder
+                enc_log._tcpa = enc_time
+                enc_log._closest_i = enc_log._debug_i
+            # self.progress("Distance to intruder = " + str(dist_to_intruder) + "m , closest approach = " + str(closest_approach) + "m at " + str(tcpa))
+            
+            # Loss of Well Clear metrics
+            lwc_h = h_dist_to_intruder < lwc_h_thresh
+            lwc_v = v_dist_to_intruder < lwc_v_thresh
+            lwc = lwc_h and lwc_v
+            if lwc:
+                enc_log._lwc_is.append(enc_log._debug_i)
+                if h_dist_to_intruder < enc_log._lwc_hmd: # update minimum lwc hmd
+                    enc_log._lwc_hmd = h_dist_to_intruder
+                if v_dist_to_intruder < enc_log._lwc_vmd: # update minimum lwc vmd
+                    enc_log._lwc_vmd = v_dist_to_intruder
+            
+            #debug plotting
+            os_ned = navpy.lla2ned(ownship_position.lat, ownship_position.lon, ownship_position.alt, initial_lla[0], initial_lla[1], 0.0) # reference altitude should be zero, not encounter mission alt
+            os_nea = np.array([os_ned[0], os_ned[1], ownship_position.alt]) # overwrite altitude
+            enc_log._os_pos.append(os_nea)
+            enc_log._os_hdg_rad.append(np.radians(ownship_position.hdg))
+            enc_log._in_pos.append([intr_north, intr_east, intr_up])
+            enc_log._in_hdg_rad.append(intr_hdg)
+            enc_log._hmd.append(h_dist_to_intruder)
+            enc_log._vmd.append(v_dist_to_intruder)
+            enc_log._md.append(dist_to_intruder)
+            enc_log._dist.append(geom.dist[enc_i])
+            enc_log._times.append(enc_time)
+            enc_log._os_spd.append(ownship_gs)
+            enc_log._os_vspd.append(ownship_position.vz)
+            enc_log._in_spd.append(intruder_hor_vel)
+            enc_log._in_vspd.append(intruder_ver_vel)
+            enc_log._guidance_counts.append(enc_log._guidance_count)
+            enc_log._skip_count += (enc_i - last_enc_i) - 1 # expect 1 (so subtract it)
+
+            enc_log._roll_outs.append(ownship_servos['servo1_raw'])
+            enc_log._pitch_outs.append(ownship_servos['servo2_raw'])
+            enc_log._throttle_outs.append(ownship_servos['servo3_raw'])
+            enc_log._yaw_outs.append(ownship_servos['servo4_raw'])
+            enc_log._pitch_rad.append(ownship_attitude['pitch'])
+            enc_log._roll_rad.append(ownship_attitude['roll'])
+            enc_log._yaw_rad.append(ownship_attitude['yaw'])
+            enc_log._pitch_rate_rad.append(ownship_attitude['pitchspeed'])
+            enc_log._roll_rate_rad.append(ownship_attitude['rollspeed'])
+            enc_log._yaw_rate_rad.append(ownship_attitude['yawspeed'])
+            
+            # - Next Timestep -
+            # self.delay_sim_time(enc_i_frac * target_dt) # minus daa_time
+            
+            last_enc_i = enc_i
+            enc_log._debug_i += 1
+            frame_i += 1
+            
+            # } if
+        # } while
+        
+        # err_score, miss_score, _skip_count, dt_avg, lwc_score, first_guidance = enc_log.do_output(daa=False)
+        if getattr(tracker, 'fused_xy_fig', None) is not None:
+            tracker_plot_path = os.path.join(run_results_home, f'{run_label}[{encounter_idx_in}]_tracker_spheres.png')
+            tracker.save_tracker_plot(tracker_plot_path, dpi=300)
+            self.progress(f'Saved tracker sphere plot to {tracker_plot_path}')
+
+        err_score, miss_score, _skip_count, dt_avg, lwc_score, nmac_score, first_guidance = enc_log.do_output(daa=True)
+            
+        # } with
+        self.stop_mavproxy(mavproxy)
+        self.disarm_vehicle(force=True)
+        # return err_score, miss_score, _skip_count, dt_avg, lwc_score, first_guidance
+        return err_score, miss_score, _skip_count, dt_avg, lwc_score, nmac_score, first_guidance
+
+
+    def RevAeroAutoTune(self):
+        '''Set up encounter sim like Jabiru ready for autotune'''
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        ## ENCOUNTER SETUP
+        encounter_idx = 0
+        encounter_folder = script_dir + '/DAA_Mission/Jabiru Based Encounters Updated Code (v0.2)/35s TCPA/'
+        ownship_file = encounter_folder + '1000os_data_at_TCPA_35.mat'
+
+        # -- BUILD ENCOUNTER --
+        # - Ownship data -
+        # Read file
+        ownship_mat_data = mat73.loadmat(ownship_file) #[field][param][idx]
+        # Convert to vector of parameter in metric units
+        ownship_east_m_raw = np.squeeze(ownship_mat_data['ownship_data']['east_ft'][encounter_idx][0]) * 0.3048
+        ownship_north_m_raw = np.squeeze(ownship_mat_data['ownship_data']['north_ft'][encounter_idx][0]) * 0.3048
+        ownship_up_m = np.squeeze(ownship_mat_data['ownship_data']['up_ft'][encounter_idx][0]) * 0.3048
+        ownship_speed_m_per_s = np.squeeze(ownship_mat_data['ownship_data']['speed_ftps'][encounter_idx][0]) * 0.3048
+        
+        # - Align with takeoff dir -
+        enc_initial_hdg = self.vector_to_heading_rad(ownship_east_m_raw[1] - ownship_east_m_raw[0], ownship_north_m_raw[1] - ownship_north_m_raw[0])
+        # takeoff_position = [-27.266337, 152.515640, 97.0, 338.4] # lat lon alt hdg (amaroo takeoff north)
+        takeoff_position = [-27.266337, 152.515640, ownship_up_m[0], 338.4] # lat lon alt hdg (amaroo takeoff north)
+        hdg_takeoff_rad = np.radians(takeoff_position[-1])
+        hdg_rad = hdg_takeoff_rad - enc_initial_hdg # align with takeoff heading & remove enc heading
+        hdg_cos = np.cos(hdg_rad)
+        hdg_sin = np.sin(hdg_rad)
+        # Rotate ownship path
+        ownship_north_m = -ownship_east_m_raw * hdg_sin + ownship_north_m_raw * hdg_cos
+        ownship_east_m = ownship_east_m_raw * hdg_cos + ownship_north_m_raw * hdg_sin
+        # Rotate intruder path
+        
+        # - Build waypoints -
+        # Measure ownship path length
+        ownship_diff_north = np.diff(ownship_east_m_raw)
+        ownship_diff_east = np.diff(ownship_north_m_raw)
+        ownship_dist = np.sqrt(ownship_diff_north * ownship_diff_north + ownship_diff_east * ownship_diff_east)
+        ownship_path_length = np.sum(ownship_dist)
+        
+        # Sample ownship path
+        waypoint_interval = 100 # metres between waypoints
+        waypoint_count = int(np.round(ownship_path_length / waypoint_interval))
+        step = int(np.floor(len(ownship_east_m) / waypoint_count))
+        sampled_north = ownship_north_m[0::step]
+        sampled_east = ownship_east_m[0::step]
+        sampled_up = ownship_up_m[0::step]
+        
+        # Calculate encounter start position
+        hdg_takeoff_cos = np.cos(hdg_takeoff_rad)
+        hdg_takeoff_sin = np.sin(hdg_takeoff_rad)
+        climb_rate = 500 # fpm (500 fpm is a conservative climb rate based on the SITL/JSBSim JabiruJ400e)
+        climb_speed = 100 # kts (100 kts is based on the SITL/JSBSim JabiruJ400e for a conservative cimb range)
+        encounter_start_alt = ownship_up_m[0]
+        encounter_start_time = encounter_start_alt / (climb_rate * 0.3048 / 60) # time (s)
+        encounter_start_downrange = climb_speed * 0.51444 * encounter_start_time
+        encounter_start_position = [encounter_start_downrange * hdg_takeoff_cos, encounter_start_downrange * hdg_takeoff_sin, encounter_start_alt] # [north, east, up]
+        
+        # Build encounter mission
+        encounter_mission = [
+            (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, encounter_start_alt), # [1] mission start, takeoff position
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, encounter_start_position[0], encounter_start_position[1], encounter_start_position[2]), # [2] encounter start position
+        ]
+        
+        for os_i in range(len(sampled_north)): # ownship mission
+            wp_pos = [encounter_start_position[0] + sampled_north[os_i], encounter_start_position[1] + sampled_east[os_i], sampled_up[os_i]] # rotated to align with takeoff dir
+            encounter_mission.append((mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, wp_pos[0], wp_pos[1], wp_pos[2])) #[3..]
+        
+        
+        ## AUTOTEST START
+        model = 'jsbsim:JabiruJ400e'
+        self.customise_SITL_commandline(
+            ["--home", str(takeoff_position)[1:-1]], # remove '[' and ']'
+            model=model,
+            # defaults_filepath=script_dir + '/DAA_Mission/jabiru-ali.param',
+            defaults_filepath=script_dir + '/DAA_Mission/jab_tune_v1.param',
+            wipe=True,
+        )
+        self.set_parameters({
+            "SIM_SPEEDUP": 1000,
+        })
+        self.upload_simple_relhome_mission(encounter_mission)
+        self.wait_ready_to_arm()
+        self.arm_vehicle()
+        self.change_mode('AUTO')
+        
+        # wait for takeoff / climb
+        self.wait_altitude(encounter_start_alt - 5, encounter_start_alt + 5, relative=True, timeout=3000)
+        # calculate equivalent airspeed given desired ground speed
+        mission_density = atmos.Rho(encounter_start_alt)
+        mission_eas = ownship_speed_m_per_s[0] * np.sqrt(mission_density / 1.2250) # assume 0 wind (thus, TAS=groundSpeed)
+        self.set_parameter("AIRSPEED_CRUISE", mission_eas) # command EAS (assume =CAS=IAS)
+        self.progress("Adjusting GS = " + str(ownship_speed_m_per_s[0]) + " to EAS (=CAS=IAS) = " + str(mission_eas))
+        
+        # wait for encounter
+        self.wait_current_waypoint(3, timeout=3000) # wait until on station at encounter start
+        
+        # (DON'T) Start encounter sim
+        self.progress("Ready for Autotune")
+        self.set_parameters({
+            "SIM_SPEEDUP": 1,
+            "SIM_WIND_SPD": 0,
+        })
+        self.change_mode('LOITER')
+        self.delay_sim_time(100000)
+        
+# DAA>
+
 
     def tests(self):
         '''return list of all tests'''
@@ -7409,7 +8917,6 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             self.TakeoffGround,
             self.TakeoffIdleThrottle,
             self.TakeoffBadLevelOff,
-            self.TakeoffLevelOffWind,
             self.ForcedDCM,
             self.DCMFallback,
             self.MAVFTP,
@@ -7468,7 +8975,15 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             self.AdvancedFailsafeBadBaro,
             self.DO_CHANGE_ALTITUDE,
             self.SET_POSITION_TARGET_GLOBAL_INT_for_altitude,
-            self.MAV_CMD_NAV_LOITER_TURNS_zero_turn,
+            self.DAA_On_Auto,
+            self.DAA_On_Directed,
+            self.DAA_Off,
+            self.DAA_Both_Auto,
+            self.DAA_Bench_Auto,
+            self.DAA_Bench_Directed,
+            self.DAA_Bench_Sim_Track,
+            self.DAA_Bench_Real_Track,
+            self.RevAeroAutoTune,
         ]
 
     def disabled_tests(self):
@@ -7487,3 +9002,4 @@ class AutoTestPlaneTests1a(AutoTestPlane):
 class AutoTestPlaneTests1b(AutoTestPlane):
     def tests(self):
         return self.tests1b()
+
