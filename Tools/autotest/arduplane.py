@@ -7415,6 +7415,10 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         intruder_type_in = os.environ.get('ARDUPLANE_INTRUDER_TYPE', 'EO')
         enc_speedup_in = float(os.environ.get('ARDUPLANE_ENC_SPEEDUP', '1.0'))
         pilot_latency_in = float(os.environ.get('ARDUPLANE_PILOT_LATENCY', '0.0'))
+        daa_constituent_mode_in = os.environ.get('ARDUPLANE_DAA_CONSTITUENT_MODE', 'closest').strip().lower()
+        if daa_constituent_mode_in not in ('closest', 'full'):
+            daa_constituent_mode_in = 'closest'
+        daa_n_vel_max_in = max(1, int(os.environ.get('ARDUPLANE_DAA_N_VEL_MAX', '3')))
         
         # Load encounter data
         encounter_folder = os.environ.get('ARDUPLANE_ENCOUNTER', 'Terry Demo')
@@ -7472,13 +7476,13 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             # DAA Off
             if (daa == 0 or daa == 2):
                 if bench == 0: # SIL (no external connection)
-                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim(False, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, pilot_latency_in)
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim(False, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, pilot_latency_in, daa_constituent_mode_in, daa_n_vel_max_in)
                     daa_on_off_str = ',DAA OFF,'
                 elif bench == 1: # Bench test, Tracker in encounter sim
-                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(False, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, True)
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(False, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, True, daa_constituent_mode_in, daa_n_vel_max_in)
                     daa_on_off_str = ',SFF Sim Tracker,'
                 elif bench == 2: # Bench test, Tracker on SFF
-                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(False, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, False)
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(False, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, False, daa_constituent_mode_in, daa_n_vel_max_in)
                     daa_on_off_str = ',SFF Real Tracker,'
                 else:
                     print("Invalid Mode")
@@ -7487,13 +7491,13 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             # DAA On
             if (daa == 1 or daa == 2):
                 if bench == 0: # SIL (no external connection)
-                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim(True, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, pilot_latency_in)
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim(True, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, pilot_latency_in, daa_constituent_mode_in, daa_n_vel_max_in)
                     daa_on_off_str = ',DAA ON,'
                 elif bench == 1: # Bench test, Tracker in encounter sim
-                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(True, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, True)
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(True, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, True, daa_constituent_mode_in, daa_n_vel_max_in)
                     daa_on_off_str = ',SFF Sim Tracker,'
                 elif bench == 2: # Bench test, Tracker on SFF
-                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(True, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, False)
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(True, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, False, daa_constituent_mode_in, daa_n_vel_max_in)
                     daa_on_off_str = ',SFF Real Tracker,'
                 else:
                     print("Invalid Mode")
@@ -7768,7 +7772,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
                 self._daa_mission_planner_adsb_warned = True
 
 
-    def encounter_sim(self, daa, isDirected, os_data_in, in_data_in, use_scipy, encounter_idx_in=1, test_id_in='', results_home_in='/home/thoma/daa_results/', daa_ip='', intruder_type='EO', enc_speedup=1.0, pilot_latency_in = 0.0):
+    def encounter_sim(self, daa, isDirected, os_data_in, in_data_in, use_scipy, encounter_idx_in=1, test_id_in='', results_home_in='/home/thoma/daa_results/', daa_ip='', intruder_type='EO', enc_speedup=1.0, pilot_latency_in = 0.0, daa_constituent_mode='closest', daa_n_vel_max=3):
         '''Run an encounter sim with SITL'''
         script_dir = os.path.dirname(os.path.abspath(__file__))
         
@@ -7790,7 +7794,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         pilot_latency = pilot_latency_in
 
         daa_label = 'DAA_ON' if daa else 'DAA_OFF'
-        run_label = daa_label
+        run_label = f'{daa_label}_const-{daa_constituent_mode}-v{daa_n_vel_max}'
         if test_id_in != '':
             run_label += '-' + test_id_in
         run_results_home = os.path.join(results_home_in, f'{run_label}[{encounter_idx_in}]') + os.sep
@@ -7802,6 +7806,8 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         # np.random.seed(2)
         tracker_dir = os.path.join(script_dir, "Tracker_and_SUM")
         tracker = Tracker(ownship_id = "OS1", script_dir=tracker_dir)
+        tracker.daidalus_constituent_mode = daa_constituent_mode
+        tracker.daidalus_n_vel_max = daa_n_vel_max
         tracker.plot = True
         tracker.plot_save_path = os.path.join(run_results_home, f'{run_label}[{encounter_idx_in}]_tracker_spheres.png')
         enc_this = Encounter(tracker.ownship, script_dir=tracker_dir)
@@ -8380,7 +8386,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         return err_score, miss_score, _skip_count, dt_avg, lwc_score, nmac_score, first_guidance
 
 
-    def encounter_sim_sff(self, daa, isDirected, os_data_in, in_data_in, use_scipy, encounter_idx_in=1, test_id_in='', results_home_in='/home/thoma/daa_results/', daa_ip='', intruder_type='EO', enc_speedup=1.0, sim_tracker=False):
+    def encounter_sim_sff(self, daa, isDirected, os_data_in, in_data_in, use_scipy, encounter_idx_in=1, test_id_in='', results_home_in='/home/thoma/daa_results/', daa_ip='', intruder_type='EO', enc_speedup=1.0, sim_tracker=False, daa_constituent_mode='closest', daa_n_vel_max=3):
         '''Run an encounter sim with SITL, connected to the SFF for bench testing'''
         script_dir = os.path.dirname(os.path.abspath(__file__))
         
@@ -8400,7 +8406,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         lwc_v_thresh = 250 * 0.3048 # these should be actual LWC not the MID region
 
         daa_label = 'DAA_ON' if daa else 'DAA_OFF'
-        run_label = daa_label
+        run_label = f'{daa_label}_const-{daa_constituent_mode}-v{daa_n_vel_max}'
         if test_id_in != '':
             run_label += '-' + test_id_in
         run_results_home = os.path.join(results_home_in, f'{run_label}[{encounter_idx_in}]') + os.sep
@@ -8411,6 +8417,8 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         
         tracker_dir = os.path.join(script_dir, "Tracker_and_SUM")
         tracker = Tracker(ownship_id = "OS1", script_dir=tracker_dir)
+        tracker.daidalus_constituent_mode = daa_constituent_mode
+        tracker.daidalus_n_vel_max = daa_n_vel_max
         tracker.plot = True
         tracker.plot_save_path = os.path.join(run_results_home, f'{run_label}[{encounter_idx_in}]_tracker_spheres.png')
         enc_this = Encounter(tracker.ownship, script_dir=tracker_dir)

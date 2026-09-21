@@ -92,6 +92,8 @@ class Tracker:
         self.debug_param_history = []
         self.debug_params_lines = []
         self.fused_vel_path_gt = None
+        self.daidalus_constituent_mode = "closest"
+        self.daidalus_n_vel_max = 3
         self.daidalus_constituent_build_count = 0
         self.daidalus_constituent_build_total_s = 0.0
         self.daidalus_constituent_build_max_s = 0.0
@@ -119,6 +121,8 @@ class Tracker:
         if not self.daidalus_timing_file_initialized:
             with open(timing_path, 'w', encoding='utf-8') as f:
                 f.write('# DAIDALUS Constituent Timing\n\n')
+                f.write(f'Mode: {self.daidalus_constituent_mode}  \n')
+                f.write(f'n_vel_max: {self.daidalus_n_vel_max}\n\n')
                 f.write('| build | sim_time_s | generated | last_ms | avg_ms | max_ms |\n')
                 f.write('|---:|---:|---:|---:|---:|---:|\n')
             self.daidalus_timing_file_initialized = True
@@ -2560,6 +2564,7 @@ class Tracker:
                     center_method="cheb", enforce_monotone=True,
                     circular_threshold=0.90,
                     p_world=None, c0_world=None,
+                    closest_position_only=False,
                 ):
                     """
                     Position constituents chosen adaptively by angular spans:
@@ -2846,7 +2851,7 @@ class Tracker:
                     # Keep only the position constituent whose surface is closest to ownship.
                     # pos_centers_w_final are offsets from the intruder mean, so compare
                     # ownship against the absolute center: c0_world + constituent_offset.
-                    if (p_world is not None) and (c0_world is not None):
+                    if closest_position_only and (p_world is not None) and (c0_world is not None):
                         pos_centers_abs = c0_world.reshape(1, 3) + pos_centers_w_final[:, :3]
                         dists_to_surface = np.linalg.norm(pos_centers_abs - p_world.reshape(1, 3), axis=1) - pos_radii_final
                         closest_idx = int(np.argmin(dists_to_surface))
@@ -2944,11 +2949,12 @@ class Tracker:
 
                 constituent_build_start_s = time.perf_counter()
                 constituent_intruders = build_intruder_constituents(
-                    intruder, n_pos_max=5, n_vel_max=3,
+                    intruder, n_pos_max=5, n_vel_max=self.daidalus_n_vel_max,
                     p_world=np.array([
                         ownship_state['north_m'], ownship_state['east_m'], ownship_state['alt']
                     ]),
-                    c0_world=np.array(intruder_state['abs_cartesian_x_y_z_smoothed'])
+                    c0_world=np.array(intruder_state['abs_cartesian_x_y_z_smoothed']),
+                    closest_position_only=(self.daidalus_constituent_mode == "closest"),
                 )
                 constituent_build_dt_s = time.perf_counter() - constituent_build_start_s
                 self.daidalus_constituent_build_count += 1
