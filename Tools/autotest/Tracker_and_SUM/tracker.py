@@ -2843,6 +2843,18 @@ class Tracker:
                             circular_threshold=circular_threshold
                         )
 
+                    # Keep only the position constituent whose surface is closest to ownship.
+                    # pos_centers_w_final are offsets from the intruder mean, so compare
+                    # ownship against the absolute center: c0_world + constituent_offset.
+                    if (p_world is not None) and (c0_world is not None):
+                        pos_centers_abs = c0_world.reshape(1, 3) + pos_centers_w_final[:, :3]
+                        dists_to_surface = np.linalg.norm(pos_centers_abs - p_world.reshape(1, 3), axis=1) - pos_radii_final
+                        closest_idx = int(np.argmin(dists_to_surface))
+
+                        pos_centers_w_final = pos_centers_w_final[closest_idx:closest_idx + 1]
+                        pos_covs_iso3_final = pos_covs_iso3_final[closest_idx:closest_idx + 1]
+                        pos_radii_final = pos_radii_final[closest_idx:closest_idx + 1]
+
                     # --------- Print spans (full angles in degrees) ---------
                     # if (p_world is not None) and (c0_world is not None):
                     #     def _fmt(x): 
@@ -2932,7 +2944,7 @@ class Tracker:
 
                 constituent_build_start_s = time.perf_counter()
                 constituent_intruders = build_intruder_constituents(
-                    intruder, n_pos_max=5, n_vel_max=5,
+                    intruder, n_pos_max=5, n_vel_max=3,
                     p_world=np.array([
                         ownship_state['north_m'], ownship_state['east_m'], ownship_state['alt']
                     ]),
