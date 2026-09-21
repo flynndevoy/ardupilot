@@ -2565,6 +2565,7 @@ class Tracker:
                     circular_threshold=0.90,
                     p_world=None, c0_world=None,
                     closest_position_only=False,
+                    force_position_count=False,
                 ):
                     """
                     Position constituents chosen adaptively by angular spans:
@@ -2692,7 +2693,7 @@ class Tracker:
                         return float(max(spans))
 
                     # ---------------- Decision logic ----------------
-                    use_adaptive = (p_world is not None) and (c0_world is not None)
+                    use_adaptive = (not force_position_count) and (p_world is not None) and (c0_world is not None)
                     pos_centers_w_final = None
                     pos_covs_iso3_final = None
                     pos_radii_final     = None
@@ -2841,7 +2842,7 @@ class Tracker:
                                         pos_centers_w_final, pos_covs_iso3_final, pos_radii_final = last_pc_w, last_pc_covs, last_radii
                                         n_pos_used = len(pos_radii_final) if pos_radii_final is not None else None
                     else:
-                        # No viewpoint/center provided -> default to n_pos_max constituents
+                        # Full/baseline mode, or no viewpoint/center provided: force n_pos_max constituents.
                         pos_centers_w_final, pos_covs_iso3_final, pos_radii_final, _ = constituents_from_cov(
                             Ppos3, n_components=n_pos_max, n_std=n_std,
                             center_method=center_method, enforce_monotone=enforce_monotone,
@@ -2955,6 +2956,7 @@ class Tracker:
                     ]),
                     c0_world=np.array(intruder_state['abs_cartesian_x_y_z_smoothed']),
                     closest_position_only=(self.daidalus_constituent_mode == "closest"),
+                    force_position_count=(self.daidalus_constituent_mode == "full"),
                 )
                 constituent_build_dt_s = time.perf_counter() - constituent_build_start_s
                 self.daidalus_constituent_build_count += 1

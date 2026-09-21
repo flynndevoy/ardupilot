@@ -7944,7 +7944,13 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             def send_fn(payload: dict) -> dict:
                 return daa_client.send_data2(daidalus_connection, payload)
 
-            ge = Guidance_Thread(send_fn=send_fn, tracker=tracker, datastore=datastore)
+            daidalus_timing_path = os.path.join(run_results_home, 'daidalus_roundtrip_timing.md')
+            ge = Guidance_Thread(
+                send_fn=send_fn,
+                tracker=tracker,
+                datastore=datastore,
+                timing_path=daidalus_timing_path,
+            )
             ge.start()
             
             while True:
