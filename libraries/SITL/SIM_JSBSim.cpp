@@ -37,6 +37,7 @@ namespace SITL {
 #pragma GCC diagnostic ignored "-Wunused-result"
 
 #define DEBUG_JSBSIM 1
+#define OVERRIDE_RATE 100.0
 
 JSBSim::JSBSim(const char *frame_str) :
     Aircraft(frame_str),
@@ -127,7 +128,8 @@ bool JSBSim::create_templates(void)
             jsbsim_model,
             jsbsim_model,
             control_port,
-            1.0/rate_hz);
+            //1.0/rate_hz);
+            1.0/OVERRIDE_RATE);
     fclose(f);
 
     f = fopen(jsbsim_fgout, "w");
@@ -138,7 +140,8 @@ bool JSBSim::create_templates(void)
             "<output name=\"127.0.0.1\" type=\"FLIGHTGEAR\" port=\"%u\" protocol=\"UDP\" rate=\"%f\">\n"
             "  <time type=\"simulation\" resolution=\"1e-6\"/>\n"
             "</output>",
-            fdm_port, rate_hz);
+            //fdm_port, rate_hz);
+            fdm_port, OVERRIDE_RATE);
     fclose(f);
 
     char *jsbsim_reset;
@@ -209,7 +212,8 @@ bool JSBSim::start_JSBSim(void)
         asprintf(&logdirective, "--logdirectivefile=%s", jsbsim_fgout);
         asprintf(&script, "--script=%s", jsbsim_script);
         asprintf(&nice, "--nice=%.8f", 10*1e-9);
-        asprintf(&rate, "--simulation-rate=%f", rate_hz);
+        //asprintf(&rate, "--simulation-rate=%f", rate_hz);
+        asprintf(&rate, "--simulation-rate=%f", OVERRIDE_RATE);
 
         if (chdir(autotest_dir) != 0) {
             perror(autotest_dir);
@@ -480,7 +484,8 @@ void JSBSim::update(const struct sitl_input &input)
     }
     send_servos(input);
     recv_fdm(input);
-    adjust_frame_time(rate_hz);
+    //adjust_frame_time(rate_hz);
+    adjust_frame_time(OVERRIDE_RATE);
     sync_frame_time();
     drain_control_socket();
 }

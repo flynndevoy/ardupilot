@@ -21,8 +21,8 @@ from matplotlib.patches import Ellipse
 from matplotlib.patches import Circle
 from matplotlib.patches import Wedge
 from scipy.spatial.distance import cdist
-import copy
 import os
+import copy
 import time
 from scipy.stats import chi2
 from collections import OrderedDict
@@ -100,9 +100,8 @@ class Tracker:
         self.daidalus_timing_file_initialized = False
 
     def save_tracker_plot(self, path, dpi=150):
-        if self.fused_xy_fig is None:
-            return
-        self.fused_xy_fig.savefig(path, dpi=dpi, bbox_inches='tight', transparent=False)
+        if self.fused_xy_fig is not None:
+            self.fused_xy_fig.savefig(path, dpi=dpi, bbox_inches='tight', transparent=False)
 
     def tracker_plot_frame_path(self, path, second):
         suffix = f'_t{second:04d}s.png'
@@ -113,28 +112,24 @@ class Tracker:
         return path + suffix
 
     def append_daidalus_timing(self, fused_time, generated_count, last_ms, avg_ms, max_ms):
-        if self.plot_save_path:
-            timing_path = os.path.join(os.path.dirname(self.plot_save_path), 'timing.md')
-        else:
-            timing_path = 'timing.md'
-
+        timing_path = (
+            os.path.join(os.path.dirname(self.plot_save_path), 'timing.md')
+            if self.plot_save_path else 'timing.md'
+        )
         if not self.daidalus_timing_file_initialized:
-            with open(timing_path, 'w', encoding='utf-8') as f:
-                f.write('# DAIDALUS Constituent Timing\n\n')
-                f.write(f'Mode: {self.daidalus_constituent_mode}  \n')
-                f.write(f'n_vel_max: {self.daidalus_n_vel_max}\n\n')
-                f.write('| build | sim_time_s | generated | last_ms | avg_ms | max_ms |\n')
-                f.write('|---:|---:|---:|---:|---:|---:|\n')
+            with open(timing_path, 'w', encoding='utf-8') as timing_file:
+                timing_file.write('# DAIDALUS Constituent Timing\n\n')
+                timing_file.write(f'Mode: {self.daidalus_constituent_mode}  \n')
+                timing_file.write(f'n_vel_max: {self.daidalus_n_vel_max}\n\n')
+                timing_file.write('| build | sim_time_s | generated | last_ms | avg_ms | max_ms |\n')
+                timing_file.write('|---:|---:|---:|---:|---:|---:|\n')
             self.daidalus_timing_file_initialized = True
 
-        with open(timing_path, 'a', encoding='utf-8') as f:
-            f.write(
+        with open(timing_path, 'a', encoding='utf-8') as timing_file:
+            timing_file.write(
                 f'| {self.daidalus_constituent_build_count} '
-                f'| {fused_time:.3f} '
-                f'| {generated_count} '
-                f'| {last_ms:.3f} '
-                f'| {avg_ms:.3f} '
-                f'| {max_ms:.3f} |\n'
+                f'| {fused_time:.3f} | {generated_count} | {last_ms:.3f} '
+                f'| {avg_ms:.3f} | {max_ms:.3f} |\n'
             )
 
     def load_config_data(self, config_file: str, config_dir='config') -> dict:
@@ -1446,11 +1441,15 @@ class Tracker:
 
             # === Create or update persistent XY plot ===
             if self.fused_xy_fig is None:
-                self.fused_xy_fig = plt.figure(figsize=(14, 6.5))
-                gs = self.fused_xy_fig.add_gridspec(nrows=1, ncols=2, wspace=0.22)
+                self.fused_xy_fig = plt.figure(figsize=(12, 8))
+                gs = self.fused_xy_fig.add_gridspec(
+                    nrows=7, ncols=2, height_ratios=[1, 1, 1, 1, 1, 1, 1], hspace=0.4
+                )
 
-                self.fused_xy_ax  = self.fused_xy_fig.add_subplot(gs[0, 0])
-                self.fused_vel_ax = self.fused_xy_fig.add_subplot(gs[0, 1])
+                self.fused_xy_ax  = self.fused_xy_fig.add_subplot(gs[0:4, 0])
+                self.fused_vel_ax = self.fused_xy_fig.add_subplot(gs[0:4, 1])
+                self.speed_ax     = self.fused_xy_fig.add_subplot(gs[4, :])
+                self.accel_ax     = self.fused_xy_fig.add_subplot(gs[5, :])
 
                 # --- XY Position Plot ---
                 self.fused_xy_ax.set_title("Fused Track in XY Plane")
@@ -1459,13 +1458,15 @@ class Tracker:
                 self.fused_xy_ax.grid(True)
                 self.fused_xy_ax.axis("equal")
 
-                # Ownship-to-fused-intruder line, useful for checking uncertainty orientation.
+                # Ownship connection (draw once)
+                if intruder_state:
+                    x_intr, y_intr = intruder_state['north_m'], intruder_state['east_m']
                 x_own, y_own = ownship_xyz[0], ownship_xyz[1]
-                self.ownship_line, = self.fused_xy_ax.plot([x_own, x], [y_own, y],
-                                                        color='black', linestyle=':', linewidth=1.4,
-                                                        zorder=1, label='Ownship-Intruder LOS')
+                if intruder_state:
+                    self.ownship_line, = self.fused_xy_ax.plot([x_intr, x_own], [y_intr, y_own],
+                                                            color='gray', linestyle=':', linewidth=1.2, zorder=1)
                 self.ownship_dot,  = self.fused_xy_ax.plot([x_own], [y_own],
-                                                        marker='o', color='black', markersize=7, zorder=4, label='Ownship')
+                                                        marker='o', color='gray', markersize=6, zorder=2)
 
                 # Paths + current points
                 xy = np.array(self.fused_xy_history)
@@ -1522,7 +1523,7 @@ class Tracker:
                 x_latest, y_latest = xy[-1, 0], xy[-1, 1]
                 self.fused_xy_ax.set_xlim(x_latest - padding, x_latest + padding)
                 self.fused_xy_ax.set_ylim(y_latest - padding, y_latest + padding)
-                self.fused_xy_ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.16), ncol=2, fontsize=8, framealpha=0.85)
+                self.fused_xy_ax.legend(loc='upper right')
 
                 # --- Velocity subplot ---
                 self.fused_vel_ax.set_title("Velocity in VX-VY Plane")
@@ -1554,17 +1555,47 @@ class Tracker:
                 padding_vel = 40
                 self.fused_vel_ax.set_xlim(vx - padding_vel, vx + padding_vel)
                 self.fused_vel_ax.set_ylim(vy - padding_vel, vy + padding_vel)
-                self.fused_vel_ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.16), ncol=2, fontsize=8, framealpha=0.85)
+                self.fused_vel_ax.legend(loc='upper right')
 
-                self.fused_xy_fig.subplots_adjust(left=0.07, right=0.98, top=0.90, bottom=0.18, wspace=0.22)
+                # --- Speed vs time subplot ---
+                self.speed_ax.set_title("Speed vs Time")
+                self.speed_ax.set_xlabel("Time (s)")
+                self.speed_ax.set_ylabel("Speed (m/s)")
+                self.speed_ax.grid(True)
+                self.speed_est_line, = self.speed_ax.plot([], [], label='Estimated Speed', color='purple')
+                self.speed_gt_line,  = self.speed_ax.plot([], [], label='GT Speed', color='green')
+                self.speed_ax.legend(loc='upper right')
+
+                # --- Debug params subplot ---
+                self.accel_ax.set_title("Debug Params vs Time")
+                self.accel_ax.set_xlabel("Time (s)")
+                self.accel_ax.set_ylabel("Debug Params")
+                self.accel_ax.grid(True)
+
+                num_debug_params = len(self.debug_param_history[0]) if self.debug_param_history else 0
+                base_colors = ['red', 'green', 'orange', 'blue', 'purple', 'cyan', 'magenta', 'brown']
+                debug_param_colors = base_colors[:num_debug_params]
+                debug_param_labels = [f'Debug Param {i+1}' for i in range(num_debug_params)]
+
+                lines_this = []
+                for color, label in zip(debug_param_colors, debug_param_labels):
+                    ln, = self.accel_ax.plot([], [], label=label, color=color)
+                    lines_this.append(ln)
+                self.debug_params_lines.append(lines_this)
+                self.accel_ax.legend(loc='upper right')
+
+                plt.tight_layout()
                 plt.pause(0.01)
 
             else:
                 # === Update existing artists ===
 
-                # 2D line from ownship to fused intruder estimate.
+                # 2D projection line intruder->ownship
+                if intruder_state:
+                    x_intr, y_intr = intruder_state['north_m'], intruder_state['east_m']
                 x_own,  y_own  = ownship_xyz[0], ownship_xyz[1]
-                self.ownship_line.set_data([x_own, x], [y_own, y])
+                if intruder_state:
+                    self.ownship_line.set_data([x_intr, x_own], [y_intr, y_own])
                 self.ownship_dot.set_data([x_own], [y_own])
 
                 # Handle camera set change (legend throttled)
@@ -1577,13 +1608,12 @@ class Tracker:
 
                     handles, labels = self.fused_xy_ax.get_legend_handles_labels()
                     cam_entries = [(h, l) for h, l in zip(handles, labels) if l.startswith("Cameras")]
-                    cam_entries = cam_entries[-4:]
+                    cam_entries = cam_entries[-4:] + [(self.fused_xy_path, label)]
                     other_entries = [(h, l) for h, l in zip(handles, labels) if not l.startswith("Cameras")]
                     self.fused_xy_ax.legend(
                         handles=[h for h, _ in other_entries + cam_entries],
                         labels=[l for _, l in other_entries + cam_entries],
-                        loc='upper center', bbox_to_anchor=(0.5, -0.16),
-                        ncol=2, fontsize=8, framealpha=0.85
+                        loc='upper right'
                     )
                 else:
                     old_x, old_y = self.fused_xy_path.get_data()
@@ -1691,7 +1721,7 @@ class Tracker:
                 self.fused_vel_path.set_data(vxy[-100:, 0], vxy[-100:, 1])
                 if intruder_state:
                     self.fused_vel_path_gt.set_data([gt_dx], [gt_dy])
-                self.fused_vel_point.set_data([vx], [vy])
+                    self.fused_vel_point.set_data([vx], [vy])
 
                 # Update velocity covariance ellipse (as patch)
                 width_v, height_v, angle_v = _cov_ellipse_params(std_vxyz[0]**2, std_vxyz[1]**2, cov_vxy, sigma_scale=stds_plot)
@@ -1704,6 +1734,9 @@ class Tracker:
                 padding_vel = 40
                 self.fused_vel_ax.set_xlim(vx - padding_vel, vx + padding_vel)
                 self.fused_vel_ax.set_ylim(vy - padding_vel, vy + padding_vel)
+
+                self.fused_xy_fig.canvas.draw()
+                self.fused_xy_fig.canvas.flush_events()
 
                 # === Time series (speed / debug) ===
                 # Compute acceleration magnitude (optional smoothing)
@@ -1725,25 +1758,17 @@ class Tracker:
                 vel_min = np.min(self.speed_history)
                 vel_max = np.max(self.speed_history)
 
-                # Separation Distance. Prefer ground-truth/reference intruder_state when
-                # available; otherwise use the fused tracker estimate already being plotted.
-                sep_dist = np.nan
-                ver_sep = np.nan
-                if intruder_state:
-                    intruder_xyz_for_sep = np.array([
-                        intruder_state['north_m'],
-                        intruder_state['east_m'],
-                        intruder_state.get('alt', z),
-                    ], dtype=float)
-                else:
-                    intruder_xyz_for_sep = np.array([x, y, z], dtype=float)
-
-                if intruder_xyz_for_sep.size >= 3:
-                    sep_dist = np.linalg.norm(intruder_xyz_for_sep[:2] - np.array(ownship_xyz[:2], dtype=float))
-                    ver_sep = abs(intruder_xyz_for_sep[2] - ownship_xyz[2])
-                    self.min_xy_separation = [min(self.min_xy_separation[0], sep_dist),
-                                            min(self.min_xy_separation[1], ver_sep)]
-
+                intruder_xyz = np.array([
+                    intruder_state['north_m'],
+                    intruder_state['east_m'],
+                    intruder_state.get('alt', z),
+                ], dtype=float) if intruder_state else np.array([x, y, z], dtype=float)
+                sep_dist = np.linalg.norm(intruder_xyz[:2] - ownship_xyz[:2])
+                ver_sep = abs(intruder_xyz[2] - ownship_xyz[2])
+                self.min_xy_separation = [
+                    min(self.min_xy_separation[0], sep_dist),
+                    min(self.min_xy_separation[1], ver_sep),
+                ]
                 sep_text = f"{sep_dist:.0f}" if np.isfinite(sep_dist) else "n/a"
                 min_sep_text = f"{self.min_xy_separation[0]:.0f}" if np.isfinite(self.min_xy_separation[0]) else "n/a"
                 ver_text = f"{ver_sep:.0f}" if np.isfinite(ver_sep) else "n/a"
@@ -1765,8 +1790,53 @@ class Tracker:
                 else:
                     self.velocity_label.set_text(velocity_text)
 
+                # Speed vs time
                 if intruder_state:
                     self.gt_speed_history.append(gs)
+                    self.speed_est_line.set_data(self.time_history, self.speed_history)
+                self.speed_gt_line.set_data(self.time_history, self.gt_speed_history)
+
+                t_min = max(0, self.time_history[-1] - 60)
+                t_max = self.time_history[-1] + 5
+                if intruder_state:
+                    v_min = min(self.speed_history + self.gt_speed_history) - 5
+                    v_max = max(self.speed_history + self.gt_speed_history) + 5
+                else:
+                    v_min = min(self.speed_history) - 5
+                    v_max = max(self.speed_history) + 5
+                self.speed_ax.set_xlim(t_min, t_max)
+                self.speed_ax.set_ylim(v_min, v_max)
+
+                # --- Debug params (safe length match) ---
+                if self.debug_param_history and self.debug_params_lines:
+                    debug_param_arrays = list(zip(*self.debug_param_history))  # per-parameter series
+                    lines_for_this = self.debug_params_lines[-1]
+
+                    for ln, vals in zip(lines_for_this, debug_param_arrays):
+                        y = np.asarray(vals, dtype=float)
+                        x_ts = np.asarray(self.time_history, dtype=float)
+                        # If y has an extra timestamp column as first element, drop it
+                        if y.size == x_ts.size + 1:
+                            y = y[1:]
+                        n = int(min(x_ts.size, y.size))
+                        if n > 0:
+                            ln.set_data(x_ts[-n:], y[-n:])
+                        else:
+                            ln.set_data([], [])
+
+                    # autoscale y to visible data
+                    try:
+                        all_vals = np.array(debug_param_arrays, dtype=object)
+                        # Flatten while ignoring None
+                        flat = np.concatenate([np.asarray(v, dtype=float) for v in debug_param_arrays if len(v) > 0])
+                        if flat.size:
+                            a_min = np.nanmin(flat[np.isfinite(flat)])
+                            a_max = np.nanmax(flat[np.isfinite(flat)])
+                            ypad = 0.05 * (a_max - a_min) if a_max != a_min else 1.0
+                            self.accel_ax.set_xlim(t_min, t_max)
+                            self.accel_ax.set_ylim(a_min - ypad, a_max + ypad)
+                    except Exception:
+                        pass
 
                 self.fused_xy_fig.canvas.draw()
                 self.fused_xy_fig.canvas.flush_events()
@@ -1774,8 +1844,12 @@ class Tracker:
                 if self.plot_save_path and np.isfinite(fused_time):
                     plot_second = int(np.floor(fused_time))
                     if plot_second >= 0 and plot_second != self.plot_last_saved_second:
-                        self.save_tracker_plot(self.tracker_plot_frame_path(self.plot_save_path, plot_second), dpi=150)
+                        self.save_tracker_plot(
+                            self.tracker_plot_frame_path(self.plot_save_path, plot_second),
+                            dpi=150,
+                        )
                         self.plot_last_saved_second = plot_second
+
                 plt.pause(0.01)
         # =========================
         # END: Faster plotting block
@@ -2101,7 +2175,7 @@ class Tracker:
                     intr_la_no, intr_lo_ea,
                     pos_centers_w, pos_covs_iso3,
                     vel_centers_w, vel_covs_iso3,
-                    pos_cov3=None, vel_cov3=None,
+                    pos_cov3=None, vel_cov3=None, vel_mean_xy=None,
                     stds_plot=2):
         """Draw/update constituent ellipses on the existing plots using your axes:
         self.fused_xy_ax and self.fused_vel_ax."""
@@ -2144,17 +2218,15 @@ class Tracker:
             base_y = float(intr_lo_ea)
 
             if pos_cov3 is not None:
-                e_parent = _ellipse_from_cov2(
+                parent = _ellipse_from_cov2(
                     np.asarray(pos_cov3, dtype=float)[0:2, 0:2],
-                    (base_x, base_y),
-                    edgecolor='darkred',
-                    linestyle='--',
-                    label=f'Parent ellipsoid projection - {stds_plot} sigma',
+                    (base_x, base_y), 'darkred', '--',
+                    f'Parent position - {stds_plot} sigma',
                 )
-                e_parent.set_zorder(0.35)
-                e_parent.set_clip_on(True)
-                self.fused_xy_ax.add_patch(e_parent)
-                parent_pos_patches.append(e_parent)
+                parent.set_zorder(0.35)
+                parent.set_clip_on(True)
+                self.fused_xy_ax.add_patch(parent)
+                parent_pos_patches.append(parent)
 
             for pc, cov_pos3 in zip(pos_centers_w, pos_covs_iso3):
                 cx = base_x + float(pc[0])
@@ -2173,7 +2245,7 @@ class Tracker:
             self._constituent_pos_patches[intruder_id] = pos_patches
             self._constituent_parent_pos_patches[intruder_id] = parent_pos_patches
 
-        # ---- Velocity (VX-VY) on your existing fused_vel_ax ----
+        # ---- Velocity (VX–VY) on your existing fused_vel_ax ----
         if hasattr(self, 'fused_vel_ax') and self.fused_vel_ax is not None:
             # Remove old
             for p in self._constituent_vel_patches.get(intruder_id, []):
@@ -2185,20 +2257,16 @@ class Tracker:
             vel_patches = []
             parent_vel_patches = []
 
-            if vel_cov3 is not None and len(vel_centers_w) > 0:
-                base_vx = float(vel_centers_w[0][0])
-                base_vy = float(vel_centers_w[0][1])
-                e_parent = _ellipse_from_cov2(
+            if vel_cov3 is not None and vel_mean_xy is not None:
+                parent = _ellipse_from_cov2(
                     np.asarray(vel_cov3, dtype=float)[0:2, 0:2],
-                    (base_vx, base_vy),
-                    edgecolor='darkorange',
-                    linestyle='--',
-                    label=f'Parent velocity ellipsoid projection - {stds_plot} sigma',
+                    vel_mean_xy, 'darkorange', '--',
+                    f'Parent velocity - {stds_plot} sigma',
                 )
-                e_parent.set_zorder(0.35)
-                e_parent.set_clip_on(True)
-                self.fused_vel_ax.add_patch(e_parent)
-                parent_vel_patches.append(e_parent)
+                parent.set_zorder(0.35)
+                parent.set_clip_on(True)
+                self.fused_vel_ax.add_patch(parent)
+                parent_vel_patches.append(parent)
 
             # Velocity ellipses are centered at (mean vx, mean vy) + constituent offsets
             # Caller should pass centers/covs for velocity constituents.
@@ -2312,7 +2380,7 @@ class Tracker:
             }
             
             if intruder_state['track_source'] == "EO":
-                isotropic_decomposition = True
+                isotropic_decomposition = False
             else:
                 isotropic_decomposition = False
 
@@ -2842,21 +2910,19 @@ class Tracker:
                                         pos_centers_w_final, pos_covs_iso3_final, pos_radii_final = last_pc_w, last_pc_covs, last_radii
                                         n_pos_used = len(pos_radii_final) if pos_radii_final is not None else None
                     else:
-                        # Full/baseline mode, or no viewpoint/center provided: force n_pos_max constituents.
+                        # No viewpoint/center provided -> default to n_pos_max constituents
                         pos_centers_w_final, pos_covs_iso3_final, pos_radii_final, _ = constituents_from_cov(
                             Ppos3, n_components=n_pos_max, n_std=n_std,
                             center_method=center_method, enforce_monotone=enforce_monotone,
                             circular_threshold=circular_threshold
                         )
 
-                    # Keep only the position constituent whose surface is closest to ownship.
-                    # pos_centers_w_final are offsets from the intruder mean, so compare
-                    # ownship against the absolute center: c0_world + constituent_offset.
-                    if closest_position_only and (p_world is not None) and (c0_world is not None):
+                    if closest_position_only and p_world is not None and c0_world is not None:
                         pos_centers_abs = c0_world.reshape(1, 3) + pos_centers_w_final[:, :3]
-                        dists_to_surface = np.linalg.norm(pos_centers_abs - p_world.reshape(1, 3), axis=1) - pos_radii_final
-                        closest_idx = int(np.argmin(dists_to_surface))
-
+                        distances_to_surface = np.linalg.norm(
+                            pos_centers_abs - p_world.reshape(1, 3), axis=1
+                        ) - pos_radii_final
+                        closest_idx = int(np.argmin(distances_to_surface))
                         pos_centers_w_final = pos_centers_w_final[closest_idx:closest_idx + 1]
                         pos_covs_iso3_final = pos_covs_iso3_final[closest_idx:closest_idx + 1]
                         pos_radii_final = pos_radii_final[closest_idx:closest_idx + 1]
@@ -2942,44 +3008,37 @@ class Tracker:
                             vel_covs_iso3=vel_covs_iso3,
                             pos_cov3=Ppos3,
                             vel_cov3=Pvel3,
+                            vel_mean_xy=(base_vx, base_vy),
                             stds_plot=getattr(self, 'stds_plot', 2),
                         )
 
                     return out
 
 
-                constituent_build_start_s = time.perf_counter()
+                constituent_start = time.perf_counter()
                 constituent_intruders = build_intruder_constituents(
-                    intruder, n_pos_max=5, n_vel_max=self.daidalus_n_vel_max,
+                    intruder,
+                    n_pos_max=5,
+                    n_vel_max=self.daidalus_n_vel_max,
                     p_world=np.array([
                         ownship_state['north_m'], ownship_state['east_m'], ownship_state['alt']
                     ]),
                     c0_world=np.array(intruder_state['abs_cartesian_x_y_z_smoothed']),
-                    closest_position_only=(self.daidalus_constituent_mode == "closest"),
-                    force_position_count=(self.daidalus_constituent_mode == "full"),
+                    closest_position_only=self.daidalus_constituent_mode == "closest",
+                    force_position_count=self.daidalus_constituent_mode == "full",
                 )
-                constituent_build_dt_s = time.perf_counter() - constituent_build_start_s
+                build_time_s = time.perf_counter() - constituent_start
                 self.daidalus_constituent_build_count += 1
-                self.daidalus_constituent_build_total_s += constituent_build_dt_s
-                self.daidalus_constituent_build_max_s = max(self.daidalus_constituent_build_max_s, constituent_build_dt_s)
-
-                last_ms = 1000.0 * constituent_build_dt_s
+                self.daidalus_constituent_build_total_s += build_time_s
+                self.daidalus_constituent_build_max_s = max(
+                    self.daidalus_constituent_build_max_s, build_time_s
+                )
+                last_ms = 1000.0 * build_time_s
                 avg_ms = 1000.0 * self.daidalus_constituent_build_total_s / self.daidalus_constituent_build_count
                 max_ms = 1000.0 * self.daidalus_constituent_build_max_s
                 self.append_daidalus_timing(
                     ownship_state['time'], len(constituent_intruders), last_ms, avg_ms, max_ms
                 )
-
-                if self.daidalus_constituent_build_count == 1 or self.daidalus_constituent_build_count % 25 == 0:
-                    print(
-                        '[DAIDALUS constituent timing] '
-                        f'n={self.daidalus_constituent_build_count} '
-                        f'last={last_ms:.3f} ms '
-                        f'avg={avg_ms:.3f} ms '
-                        f'max={max_ms:.3f} ms '
-                        f'generated={len(constituent_intruders)}'
-                    )
-
                 intruder_states_input.extend(constituent_intruders)
 
         final_data = {"o": ownship_state_input,
@@ -3481,6 +3540,3 @@ class Tracker:
         
 
         return kf
-
-
-

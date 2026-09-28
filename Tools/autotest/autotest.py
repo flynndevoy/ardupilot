@@ -890,6 +890,43 @@ if __name__ == "__main__":
                       default=False,
                       action='store_true',
                       help='Generate Junit XML tests report')
+    ## DAA
+    parser.add_option("--start",
+                      dest="start",
+                      type="int",
+                      default=0,
+                      help="start index into the path list (default: 0)")
+    parser.add_option("--end",
+                      dest="end",
+                      type="int",
+                      default=None,
+                      help="end index into the path list (exclusive; default: start+1)")
+    parser.add_option("--encounter",
+                      dest="encounter",
+                      type="string",        # optional, since 'string' is the default
+                      default=None,         # or "" if you prefer an empty string
+                      help="encounter folder name (e.g. 'Terry Demo')")
+    parser.add_option("--daaip",
+                      dest="daaip",
+                      type="string",        # optional, since 'string' is the default
+                      default=None,         # or "" if you prefer an empty string
+                      help="The IP address of the DAA Compute, (e.g. wsl gateway IP or SFF computer IP)")
+    parser.add_option("--intr-type",
+                      dest="intr_type",
+                      type="string",
+                      default="EO",
+                      help="Intruder type, 'EO': uncooperative, 'ADSB': cooperative")
+    parser.add_option("--enc-speedup",
+                      dest="enc_speedup",
+                      type="str",
+                      default=1.0,
+                      help="sim speedup for encounter sim portion")
+    parser.add_option("--pilot",
+                      dest="pilot",
+                      type="str",
+                      default=0.0,
+                      help="pilot latency in seconds")
+    ## DAA
 
     group_build = optparse.OptionGroup(parser, "Build options")
     group_build.add_option("--no-configure",
@@ -1030,6 +1067,29 @@ if __name__ == "__main__":
     parser.add_option_group(group_completion)
 
     opts, args = parser.parse_args()
+
+    ## DAA
+    os.environ['ARDUPLANE_ENC_START'] = str(opts.start)
+    if opts.end is not None:
+        os.environ['ARDUPLANE_ENC_END'] = str(opts.end)
+    else:
+        # make sure it’s unset if they didn’t pass it:
+        os.environ.pop('ARDUPLANE_ENC_END', None)
+
+    os.environ['ARDUPLANE_ENCOUNTER'] = opts.encounter
+
+    if opts.daaip is not None:
+        os.environ['ARDUPLANE_DAA_IP'] = str(opts.daaip)
+    else:
+        # make sure it’s unset if they didn’t pass it:
+        os.environ.pop('ARDUPLANE_DAA_IP', None)
+
+    os.environ['ARDUPLANE_INTRUDER_TYPE'] = opts.intr_type
+
+    os.environ['ARDUPLANE_ENC_SPEEDUP'] = str(opts.enc_speedup)
+    os.environ['ARDUPLANE_PILOT_LATENCY'] = str(opts.pilot)
+    ## DAA
+
 
     # canonicalise on opts.debug:
     if opts.debug is None and opts.no_debug is None:

@@ -7385,7 +7385,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
     def find_first_file(self, dir_path, in_names):
         p = Path(dir_path)
         for f in p.iterdir(): # iterate over entries in the directory
-            if f.is_file():
+            if f.is_file() and f.suffix.lower() == ".mat":
                 for in_name in in_names:
                     if in_name in f.name:
                         return f.name # return the first matching Path object
@@ -7415,10 +7415,6 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         intruder_type_in = os.environ.get('ARDUPLANE_INTRUDER_TYPE', 'EO')
         enc_speedup_in = float(os.environ.get('ARDUPLANE_ENC_SPEEDUP', '1.0'))
         pilot_latency_in = float(os.environ.get('ARDUPLANE_PILOT_LATENCY', '0.0'))
-        daa_constituent_mode_in = os.environ.get('ARDUPLANE_DAA_CONSTITUENT_MODE', 'closest').strip().lower()
-        if daa_constituent_mode_in not in ('closest', 'full'):
-            daa_constituent_mode_in = 'closest'
-        daa_n_vel_max_in = max(1, int(os.environ.get('ARDUPLANE_DAA_N_VEL_MAX', '3')))
         
         # Load encounter data
         encounter_folder = os.environ.get('ARDUPLANE_ENCOUNTER', 'Terry Demo')
@@ -7448,9 +7444,12 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         test_id = str(int(np.round(60*(time.time()-1735689600)/3600))) + '_' + self.last_segment(encounter_folder) # whole hours*10 since 2025 start
 
         # 2) loop through encounters
-        # create results home
-        results_home = str(Path.home()) + '/daa_results/'
-        Path(results_home).mkdir(exist_ok=True)
+        results_home = os.environ.get('ARDUPLANE_RESULTS_DIR')
+        if not results_home:
+            run_id = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S_%f')
+            results_home = str(Path.home() / 'daa_results' / f'{run_id}_{self.last_segment(encounter_folder)}')
+        Path(results_home).mkdir(parents=True, exist_ok=True)
+        results_home = str(Path(results_home)) + os.sep
         # create results file
         test_results = open(results_home + 'errors-' + test_id + ".csv", "w")
         if end is None:
@@ -7476,13 +7475,13 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             # DAA Off
             if (daa == 0 or daa == 2):
                 if bench == 0: # SIL (no external connection)
-                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim(False, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, pilot_latency_in, daa_constituent_mode_in, daa_n_vel_max_in)
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim(False, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, pilot_latency_in)
                     daa_on_off_str = ',DAA OFF,'
                 elif bench == 1: # Bench test, Tracker in encounter sim
-                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(False, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, True, daa_constituent_mode_in, daa_n_vel_max_in)
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(False, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, True)
                     daa_on_off_str = ',SFF Sim Tracker,'
                 elif bench == 2: # Bench test, Tracker on SFF
-                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(False, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, False, daa_constituent_mode_in, daa_n_vel_max_in)
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(False, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, False)
                     daa_on_off_str = ',SFF Real Tracker,'
                 else:
                     print("Invalid Mode")
@@ -7491,13 +7490,13 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             # DAA On
             if (daa == 1 or daa == 2):
                 if bench == 0: # SIL (no external connection)
-                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim(True, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, pilot_latency_in, daa_constituent_mode_in, daa_n_vel_max_in)
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim(True, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, pilot_latency_in)
                     daa_on_off_str = ',DAA ON,'
                 elif bench == 1: # Bench test, Tracker in encounter sim
-                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(True, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, True, daa_constituent_mode_in, daa_n_vel_max_in)
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(True, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, True)
                     daa_on_off_str = ',SFF Sim Tracker,'
                 elif bench == 2: # Bench test, Tracker on SFF
-                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(True, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, False, daa_constituent_mode_in, daa_n_vel_max_in)
+                    err_score, miss_score, skp, dt, lwc_score, nmac_score, guidance = self.encounter_sim_sff(True, isDirected, os_data, in_data, use_scipy, encounter, test_id, results_home, daa_ip_in, intruder_type_in, enc_speedup_in, False)
                     daa_on_off_str = ',SFF Real Tracker,'
                 else:
                     print("Invalid Mode")
@@ -7699,80 +7698,27 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
                      h_dist, v_dist, dist,
                      takeoff_position, encounter_mission, encounter_start_alt, target_dt, enc_len)
 
-    def send_intruder_adsb_to_gcs(self, intruder_lla, heading_deg, ground_speed_mps, vertical_speed_mps, encounter_idx):
-        '''Send the encounter intruder as ADS-B traffic for Mission Planner display.'''
-        flags = (
-            mavutil.mavlink.ADSB_FLAGS_VALID_COORDS |
-            mavutil.mavlink.ADSB_FLAGS_VALID_ALTITUDE |
-            mavutil.mavlink.ADSB_FLAGS_VALID_HEADING |
-            mavutil.mavlink.ADSB_FLAGS_VALID_VELOCITY |
-            mavutil.mavlink.ADSB_FLAGS_VALID_CALLSIGN |
-            mavutil.mavlink.ADSB_FLAGS_VALID_SQUAWK |
-            mavutil.mavlink.ADSB_FLAGS_SIMULATED |
-            mavutil.mavlink.ADSB_FLAGS_VERTICAL_VELOCITY_VALID
+    def _configure_encounter_tracker(self, tracker, daa, test_id, results_home, encounter_idx):
+        mode = os.environ.get("ARDUPLANE_CONSTITUENT_MODE", "closest").strip().lower()
+        n_vel_max = int(os.environ.get("ARDUPLANE_N_VEL_MAX", "3"))
+        if mode not in ("closest", "full"):
+            raise ValueError(f"Unsupported constituent mode: {mode}")
+        if n_vel_max < 1:
+            raise ValueError("N_VEL_MAX must be at least 1")
+
+        tracker.daidalus_constituent_mode = mode
+        tracker.daidalus_n_vel_max = n_vel_max
+        tracker.plot = os.environ.get("ARDUPLANE_TRACKER_PLOT", "off").strip().lower() == "on"
+        daa_label = "DAA_ON" if daa else "DAA_OFF"
+        if test_id:
+            daa_label += f"-{test_id}"
+        tracker.plot_save_path = os.path.join(
+            results_home, f"{daa_label}[{encounter_idx}]_tracker_spheres.png"
         )
-        icao_address = 0xDAA000 + (int(encounter_idx) & 0x0FFF)
-        callsign = ("INTR%04d" % int(encounter_idx)).encode("ascii")
-        lat = int(float(intruder_lla[0]) * 1e7)
-        lon = int(float(intruder_lla[1]) * 1e7)
-        alt = int(float(intruder_lla[2]) * 1000.0)
-        heading = int(float(heading_deg) * 100.0) % 36000
-        hor_velocity = max(0, int(float(ground_speed_mps) * 100.0))
-        ver_velocity = int(float(vertical_speed_mps) * 100.0)
-
-        try:
-            self.mav.mav.adsb_vehicle_send(
-                icao_address,
-                lat,
-                lon,
-                mavutil.mavlink.ADSB_ALTITUDE_TYPE_GEOMETRIC,
-                alt,
-                heading,
-                hor_velocity,
-                ver_velocity,
-                callsign,
-                mavutil.mavlink.ADSB_EMITTER_TYPE_LIGHT,
-                1,
-                flags,
-                1200
-            )
-        except Exception as e:
-            if not getattr(self, "_daa_adsb_vehicle_warned", False):
-                self.progress("Failed to send intruder ADS-B to ArduPilot: %s" % e)
-                self._daa_adsb_vehicle_warned = True
-
-        try:
-            gcs_ip = netifaces.gateways()['default'][netifaces.AF_INET][0]
-            gcs = getattr(self, "_daa_mission_planner_adsb_out", None)
-            if gcs is None:
-                gcs = mavutil.mavlink_connection(
-                    "udpout:%s:14550" % gcs_ip,
-                    source_system=252,
-                    source_component=191
-                )
-                self._daa_mission_planner_adsb_out = gcs
-            gcs.mav.adsb_vehicle_send(
-                icao_address,
-                lat,
-                lon,
-                mavutil.mavlink.ADSB_ALTITUDE_TYPE_GEOMETRIC,
-                alt,
-                heading,
-                hor_velocity,
-                ver_velocity,
-                callsign,
-                mavutil.mavlink.ADSB_EMITTER_TYPE_LIGHT,
-                1,
-                flags,
-                1200
-            )
-        except Exception as e:
-            if not getattr(self, "_daa_mission_planner_adsb_warned", False):
-                self.progress("Failed to send intruder ADS-B to Mission Planner: %s" % e)
-                self._daa_mission_planner_adsb_warned = True
+        self.progress(f"DAIDALUS constituent mode: {mode}, n_vel_max: {n_vel_max}")
 
 
-    def encounter_sim(self, daa, isDirected, os_data_in, in_data_in, use_scipy, encounter_idx_in=1, test_id_in='', results_home_in='/home/thoma/daa_results/', daa_ip='', intruder_type='EO', enc_speedup=1.0, pilot_latency_in = 0.0, daa_constituent_mode='closest', daa_n_vel_max=3):
+    def encounter_sim(self, daa, isDirected, os_data_in, in_data_in, use_scipy, encounter_idx_in=1, test_id_in='', results_home_in='/home/thoma/daa_results/', daa_ip='', intruder_type='EO', enc_speedup=1.0, pilot_latency_in = 0.0):
         '''Run an encounter sim with SITL'''
         script_dir = os.path.dirname(os.path.abspath(__file__))
         
@@ -7793,23 +7739,13 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         nmac_v_thresh = 100 * 0.3048
         pilot_latency = pilot_latency_in
 
-        daa_label = 'DAA_ON' if daa else 'DAA_OFF'
-        run_label = f'{daa_label}_const-{daa_constituent_mode}-v{daa_n_vel_max}'
-        if test_id_in != '':
-            run_label += '-' + test_id_in
-        run_results_home = os.path.join(results_home_in, f'{run_label}[{encounter_idx_in}]') + os.sep
-        Path(run_results_home).mkdir(parents=True, exist_ok=True)
-
         geom = self.build_encounter(os_data_in, in_data_in, encounter_idx_in, use_scipy)
-        enc_log = EncounterSimLogger(daa, test_id_in, run_results_home, encounter_idx_in, geom)
+        enc_log = EncounterSimLogger(daa, test_id_in, results_home_in, encounter_idx_in, geom)
 
         # np.random.seed(2)
         tracker_dir = os.path.join(script_dir, "Tracker_and_SUM")
         tracker = Tracker(ownship_id = "OS1", script_dir=tracker_dir)
-        tracker.daidalus_constituent_mode = daa_constituent_mode
-        tracker.daidalus_n_vel_max = daa_n_vel_max
-        tracker.plot = True
-        tracker.plot_save_path = os.path.join(run_results_home, f'{run_label}[{encounter_idx_in}]_tracker_spheres.png')
+        self._configure_encounter_tracker(tracker, daa, test_id_in, results_home_in, encounter_idx_in)
         enc_this = Encounter(tracker.ownship, script_dir=tracker_dir)
 
         intruder_type_upper = str.upper(intruder_type)
@@ -7895,8 +7831,9 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             "SIM_WIND_DIR": 0.0
         })
 
-        mavproxy.send("output add {}:14550\n".format(_daa_ip)) # off-board mission planner
-        mavproxy.send("output add {}:14550\n".format(netifaces.gateways()['default'][netifaces.AF_INET][0])) # local mission planner
+        if os.environ.get("ARDUPLANE_MISSION_PLANNER", "on").strip().lower() != "off":
+            mavproxy.send("output add {}:14550\n".format(_daa_ip)) # off-board mission planner
+            mavproxy.send("output add {}:14550\n".format(netifaces.gateways()['default'][netifaces.AF_INET][0])) # local mission planner
         mavproxy.send("output add {}:14552\n".format(_daa_ip)) # other (e.g. SFF)
         
         
@@ -7944,13 +7881,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             def send_fn(payload: dict) -> dict:
                 return daa_client.send_data2(daidalus_connection, payload)
 
-            daidalus_timing_path = os.path.join(run_results_home, 'daidalus_roundtrip_timing.md')
-            ge = Guidance_Thread(
-                send_fn=send_fn,
-                tracker=tracker,
-                datastore=datastore,
-                timing_path=daidalus_timing_path,
-            )
+            ge = Guidance_Thread(send_fn=send_fn, tracker=tracker, datastore=datastore)
             ge.start()
             
             while True:
@@ -8071,13 +8002,6 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
                             # "aligned": aligned
                         }
                     adsb_intruders.append(traffic)
-                    self.send_intruder_adsb_to_gcs(
-                        intruder_lla,
-                        intruder_heading_deg,
-                        intruder_hor_vel,
-                        intruder_ver_vel,
-                        enc_log.encounter_idx
-                    )
 
                 ### <SUM ############################################################################################################
 
@@ -8378,12 +8302,8 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
                 # } if
             # } while
             hmi_connection.stop_hmi_server()
+            tracker.save_tracker_plot(tracker.plot_save_path)
             
-            if getattr(tracker, 'fused_xy_fig', None) is not None:
-                tracker_plot_path = os.path.join(run_results_home, f'{run_label}[{encounter_idx_in}]_tracker_spheres.png')
-                tracker.save_tracker_plot(tracker_plot_path, dpi=300)
-                self.progress(f'Saved tracker sphere plot to {tracker_plot_path}')
-
             err_score, miss_score, _skip_count, dt_avg, lwc_score, nmac_score, first_guidance = enc_log.do_output()
             
         # } with
@@ -8392,7 +8312,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         return err_score, miss_score, _skip_count, dt_avg, lwc_score, nmac_score, first_guidance
 
 
-    def encounter_sim_sff(self, daa, isDirected, os_data_in, in_data_in, use_scipy, encounter_idx_in=1, test_id_in='', results_home_in='/home/thoma/daa_results/', daa_ip='', intruder_type='EO', enc_speedup=1.0, sim_tracker=False, daa_constituent_mode='closest', daa_n_vel_max=3):
+    def encounter_sim_sff(self, daa, isDirected, os_data_in, in_data_in, use_scipy, encounter_idx_in=1, test_id_in='', results_home_in='/home/thoma/daa_results/', daa_ip='', intruder_type='EO', enc_speedup=1.0, sim_tracker=False):
         '''Run an encounter sim with SITL, connected to the SFF for bench testing'''
         script_dir = os.path.dirname(os.path.abspath(__file__))
         
@@ -8411,22 +8331,12 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         lwc_h_thresh = 2200 * 0.3048 # these should be actual LWC not the MID region
         lwc_v_thresh = 250 * 0.3048 # these should be actual LWC not the MID region
 
-        daa_label = 'DAA_ON' if daa else 'DAA_OFF'
-        run_label = f'{daa_label}_const-{daa_constituent_mode}-v{daa_n_vel_max}'
-        if test_id_in != '':
-            run_label += '-' + test_id_in
-        run_results_home = os.path.join(results_home_in, f'{run_label}[{encounter_idx_in}]') + os.sep
-        Path(run_results_home).mkdir(parents=True, exist_ok=True)
-
         geom = self.build_encounter(os_data_in, in_data_in, encounter_idx_in, use_scipy)
-        enc_log = EncounterSimLogger(daa, test_id_in, run_results_home, encounter_idx_in, geom)
+        enc_log = EncounterSimLogger(daa, test_id_in, results_home_in, encounter_idx_in, geom)
         
         tracker_dir = os.path.join(script_dir, "Tracker_and_SUM")
         tracker = Tracker(ownship_id = "OS1", script_dir=tracker_dir)
-        tracker.daidalus_constituent_mode = daa_constituent_mode
-        tracker.daidalus_n_vel_max = daa_n_vel_max
-        tracker.plot = True
-        tracker.plot_save_path = os.path.join(run_results_home, f'{run_label}[{encounter_idx_in}]_tracker_spheres.png')
+        self._configure_encounter_tracker(tracker, daa, test_id_in, results_home_in, encounter_idx_in)
         enc_this = Encounter(tracker.ownship, script_dir=tracker_dir)
 
         intruder_type_upper = str.upper(intruder_type)
@@ -8484,8 +8394,9 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             "SIM_WIND_DIR": 0.0
         })
 
-        mavproxy.send("output add {}:14550\n".format(_daa_ip)) # off-board mission planner
-        mavproxy.send("output add {}:14550\n".format(netifaces.gateways()['default'][netifaces.AF_INET][0])) # local mission planner
+        if os.environ.get("ARDUPLANE_MISSION_PLANNER", "on").strip().lower() != "off":
+            mavproxy.send("output add {}:14550\n".format(_daa_ip)) # off-board mission planner
+            mavproxy.send("output add {}:14550\n".format(netifaces.gateways()['default'][netifaces.AF_INET][0])) # local mission planner
         mavproxy.send("output add {}:14552\n".format(_daa_ip)) # other (e.g. SFF)
 
         if isDirected: # Change to FBWA, pilot flies entire encounter
@@ -8703,11 +8614,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         # } while
         
         # err_score, miss_score, _skip_count, dt_avg, lwc_score, first_guidance = enc_log.do_output(daa=False)
-        if getattr(tracker, 'fused_xy_fig', None) is not None:
-            tracker_plot_path = os.path.join(run_results_home, f'{run_label}[{encounter_idx_in}]_tracker_spheres.png')
-            tracker.save_tracker_plot(tracker_plot_path, dpi=300)
-            self.progress(f'Saved tracker sphere plot to {tracker_plot_path}')
-
+        tracker.save_tracker_plot(tracker.plot_save_path)
         err_score, miss_score, _skip_count, dt_avg, lwc_score, nmac_score, first_guidance = enc_log.do_output(daa=True)
             
         # } with
@@ -9016,4 +8923,3 @@ class AutoTestPlaneTests1a(AutoTestPlane):
 class AutoTestPlaneTests1b(AutoTestPlane):
     def tests(self):
         return self.tests1b()
-

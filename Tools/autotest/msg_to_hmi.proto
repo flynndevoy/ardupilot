@@ -1,0 +1,131 @@
+syntax = "proto3";
+
+package msg_to_hmi;
+
+message ImageFrame {
+  bytes image_data = 1;
+  int64 timestamp = 2;
+}
+
+message FlightDataStreamResponse {
+  OwnshipMsg ownship_msg = 1;
+  repeated TrafficMsg traffic = 2;
+  DaidalusOutput daidalus_output = 3;
+  ControllerMode controller_mode = 4;
+}
+
+message Coordinates {
+  double lat = 1;
+  double lon = 2;
+  double alt = 3;
+}
+
+message Velocity {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+}
+
+message Wind {
+  double speed = 1;
+  double direction = 2;
+}
+
+message ControllerMode {
+  Mode mode = 1;
+}
+
+message OwnshipMsg {
+  string id = 1;
+  bool is_active = 2;
+  Coordinates s = 3;
+  Velocity v = 4;
+  optional Wind wind = 5;
+  optional int64 gps_time = 6;
+}
+
+enum TrafficType {
+  ADSB = 0;
+  VISION = 1;
+  FUSED = 2;
+}
+
+enum Mode {
+  OFF = 0;          
+  START_UP = 1;    
+  SURVEILLANCE = 2;
+  DIRECTED = 3;     
+  AUTOMATED = 4;  
+}
+
+message TrafficMsg {
+  string id = 1;
+  bool is_active = 2;
+  Coordinates s = 3;
+  Velocity v = 4;
+  TrafficType t_type = 5;
+  ImageFrame bounding_box = 6;
+}
+
+enum RegionType {
+  UNSPECIFIED = 0;
+  NONE = 1;
+  NEAR = 2;
+  MID = 3;
+  FAR = 4;
+  RECOVERY = 5;
+  UNKNOWN = 6;
+}
+
+message HorizontalGuidance {
+  double lower_trk_deg = 1;
+  double upper_trk_deg = 2;
+  RegionType region_type = 3;
+}
+
+message AltitudeGuidance {
+  double lower_alt_m = 1;
+  double upper_alt_m = 2;
+  RegionType region_type = 3;
+}
+
+message HorizontalSpeedGuidance {
+  double lower_h_spd_m_per_s = 1;
+  double upper_h_spd_m_per_s = 2;
+  RegionType region_type = 3;
+}
+
+message VerticalSpeedGuidance {
+  double lower_v_spd_m_per_s = 1;
+  double upper_v_spd_m_per_s = 2;
+  RegionType region_type = 3;
+}
+
+message IntruderAlert {
+  string id = 1;
+  optional double t2los_sec = 2;
+  optional double t2cpa_sec = 3;
+  optional double horizontal_separation_NM = 4;
+  int32 alert_level = 5;
+}
+
+message DaidalusOutput {
+  repeated HorizontalGuidance horizontal_guidance = 1;
+  repeated AltitudeGuidance altitude_guidance = 2;
+  repeated HorizontalSpeedGuidance horizontal_speed_guidance = 3;
+  repeated VerticalSpeedGuidance vertical_speed_guidance = 4;
+  repeated IntruderAlert intruders = 5;
+  optional double suggested_hdir_deg = 6;
+  optional double suggested_hspd_knot = 7;
+  optional double suggested_vspd_fpm = 8;
+  optional double suggested_alt_ft = 9;
+}
+
+message StreamRequest {
+  // Placeholder for possible input parameters
+  string session_id = 1;
+}
+
+service FlightDataService {
+  rpc SubscribeFlightData (StreamRequest) returns (stream FlightDataStreamResponse);
+}

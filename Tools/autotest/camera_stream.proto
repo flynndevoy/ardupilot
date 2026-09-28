@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package camera_stream;
+
+message CameraStreamRequest {
+  string camera_id = 1;
+  DesiredDimensions dimensions = 2;
+}
+
+message DesiredDimensions {
+  int32 width_px = 1;
+  int32 height_px = 2;
+}
+
+
+message ImageFrame {
+  bytes image_data = 1;
+  int64 timestamp = 2;
+}
+
+service CameraStreamingService {
+  rpc GetPngCameraStream (CameraStreamRequest) returns (stream ImageFrame);
+}

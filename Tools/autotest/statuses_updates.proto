@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package daa_statuses;
+
+// Example of statuses
+enum DaaSystemStatus {
+  STATUS_UNSPECIFIED = 0;
+  OPERATIONAL = 1;
+  DEGRADED = 2;
+  WARNING = 3;
+  ERROR = 4;
+  OFFLINE = 5;
+  INITIALIZING = 6;
+  MAINTENANCE = 7;
+}
+
+message StatusSubscriptionRequest {
+  DaaSystemStatus minimum_alert_level = 1;
+}
+
+message StatusUpdate {
+  string component_id = 1;
+  DaaSystemStatus status = 2;
+  string message = 3;
+  int64 timestamp = 4;
+}
+
+service DaaStatusService {
+  rpc SubscribeToStatusUpdates (StatusSubscriptionRequest) returns (stream StatusUpdate);
+}
