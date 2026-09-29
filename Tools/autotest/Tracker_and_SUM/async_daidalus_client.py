@@ -163,7 +163,12 @@ class Guidance_Thread:
 
         # success: publish then mark free
         # get the current time of the ownship when the response if recieved
-        ts = self.datastore['track']['processed_ownship_state']['time']
+        ownship_state = self.datastore['track']['processed_ownship_state']
+        ts = (
+            ownship_state.get('time')
+            if isinstance(ownship_state, dict)
+            else ownship_state.time
+        )
         shdir = response.get('suggested_hdir_deg', np.nan)
         shspd_knot = response.get('suggested_hspd_knot', np.nan)
         svspd_fpm = response.get('suggested_vspd_fpm', np.nan)

@@ -54,6 +54,7 @@ from encounter_sim_helpers import EncounterSimLogger, EncounterGeometry
 # from synthetic_encounter_classes import *
 # from sum_functions import *
 from Tracker_and_SUM.tracker import *
+from Tracker_and_SUM.tracker_v3_adapter import TrackerV3Adapter
 from Tracker_and_SUM.ownship_camera_classes import *
 from Tracker_and_SUM.synthetic_encounter_classes import *
 from Tracker_and_SUM.sum_functions import *
@@ -7698,6 +7699,27 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
                      h_dist, v_dist, dist,
                      takeoff_position, encounter_mission, encounter_start_alt, target_dt, enc_len)
 
+    def _create_encounter_tracker(self, ownship_id, tracker_dir):
+        implementation = os.environ.get("ARDUPLANE_TRACKER_IMPL", "legacy").strip().lower()
+        if implementation == "v3":
+            return TrackerV3Adapter(ownship_id=ownship_id, script_dir=tracker_dir)
+        if implementation != "legacy":
+            raise ValueError(f"Unsupported ARDUPLANE_TRACKER_IMPL: {implementation}")
+        return Tracker(ownship_id=ownship_id, script_dir=tracker_dir)
+
+    @staticmethod
+    def _track_position_for_log(track, field):
+        if isinstance(track, dict):
+            position = track.get(field)
+            if position is None:
+                position = track.get("abs_cartesian_x_y_z_smoothed")
+            return position
+
+        position = getattr(track, field, None)
+        if position is None:
+            position = getattr(track, "abs_cartesian_x_y_z_smoothed", None)
+        return position
+
     def _configure_encounter_tracker(self, tracker, daa, test_id, results_home, encounter_idx):
         mode = os.environ.get("ARDUPLANE_CONSTITUENT_MODE", "closest").strip().lower()
         n_vel_max = int(os.environ.get("ARDUPLANE_N_VEL_MAX", "3"))
@@ -7705,6 +7727,23 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             raise ValueError(f"Unsupported constituent mode: {mode}")
         if n_vel_max < 1:
             raise ValueError("N_VEL_MAX must be at least 1")
+
+        if isinstance(tracker, TrackerV3Adapter):
+            tracker.plot = os.environ.get(
+                "ARDUPLANE_TRACKER_PLOT", "off"
+            ).strip().lower() == "on"
+            if tracker.plot:
+                daa_label = "DAA_ON" if daa else "DAA_OFF"
+                if test_id:
+                    daa_label += f"-{test_id}"
+                tracker.plot_save_path = os.path.join(
+                    results_home,
+                    f"{daa_label}[{encounter_idx}]_tracker_uncertainty",
+                )
+                self.progress(
+                    f"Tracker v3 uncertainty frames: {tracker.plot_save_path}"
+                )
+            return
 
         tracker.daidalus_constituent_mode = mode
         tracker.daidalus_n_vel_max = n_vel_max
@@ -7744,7 +7783,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
 
         # np.random.seed(2)
         tracker_dir = os.path.join(script_dir, "Tracker_and_SUM")
-        tracker = Tracker(ownship_id = "OS1", script_dir=tracker_dir)
+        tracker = self._create_encounter_tracker("OS1", tracker_dir)
         self._configure_encounter_tracker(tracker, daa, test_id_in, results_home_in, encounter_idx_in)
         enc_this = Encounter(tracker.ownship, script_dir=tracker_dir)
 
@@ -8071,8 +8110,17 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
                 rtrn_track_items = copy.deepcopy(datastore['track']['track_items'])
 
                 if rtrn_track_items:
-                    enc_log._in_pos_detected.append(list(rtrn_track_items.values())[0]['abs_cartesian_x_y_z'][:3])
-                    enc_log._in_pos_smoothed.append(list(rtrn_track_items.values())[0]['abs_cartesian_x_y_z_smoothed'])
+                    first_track = next(iter(rtrn_track_items.values()))
+                    detected_position = self._track_position_for_log(
+                        first_track, "abs_cartesian_x_y_z"
+                    )
+                    smoothed_position = self._track_position_for_log(
+                        first_track, "abs_cartesian_x_y_z_smoothed"
+                    )
+                    if detected_position is not None:
+                        enc_log._in_pos_detected.append(detected_position[:3])
+                    if smoothed_position is not None:
+                        enc_log._in_pos_smoothed.append(smoothed_position)
 
                 ### <DECIDE #########################################################################################################
                 if rtrn_daidalus:
@@ -8335,7 +8383,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         enc_log = EncounterSimLogger(daa, test_id_in, results_home_in, encounter_idx_in, geom)
         
         tracker_dir = os.path.join(script_dir, "Tracker_and_SUM")
-        tracker = Tracker(ownship_id = "OS1", script_dir=tracker_dir)
+        tracker = self._create_encounter_tracker("OS1", tracker_dir)
         self._configure_encounter_tracker(tracker, daa, test_id_in, results_home_in, encounter_idx_in)
         enc_this = Encounter(tracker.ownship, script_dir=tracker_dir)
 
@@ -8527,11 +8575,13 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             if sim_tracker:
                 # Tracker is here
                 processed_ownship_state = tracker.process_ownship_state(synthetic_ownship_mavlink_position, synthetic_ownship_mavlink_attitude)
-                new_track_points = tracker.update_tracks_v3(synthetic_detector_output, adsb_intruders=adsb_intruders)
+                new_track_points, all_current_intruder_tracks, _ = tracker.update_tracks_v3(
+                    processed_ownship_state, synthetic_detector_output, adsb_intruders
+                )
 
                 # - Send SFF -
                 if new_track_points:
-                    daidalus_input = tracker.create_daidalus_input(processed_ownship_state, new_track_points)
+                    daidalus_input = tracker.create_daidalus_input(processed_ownship_state, all_current_intruder_tracks)
                     daidalus_intruders = daidalus_input.get("d", [])
                     if daidalus_intruders:
                         daidalus_input["d"][0]["ty"] = traffic_type
@@ -8540,8 +8590,23 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
                     if sff:
                         sum_client.send_daidalus_data(sff, daidalus_input)
 
-                    enc_log._in_pos_detected.append(list(new_track_points.values())[0]['abs_cartesian_x_y_z'][:3])
-                    enc_log._in_pos_smoothed.append(list(new_track_points.values())[0]['abs_cartesian_x_y_z_smoothed'])
+                    intruder_track_points = {
+                        track_id: track
+                        for track_id, track in new_track_points.items()
+                        if track_id != "Ownship"
+                    }
+                    if intruder_track_points:
+                        first_intruder_track = next(iter(intruder_track_points.values()))
+                        detected_position = self._track_position_for_log(
+                            first_intruder_track, "abs_cartesian_x_y_z"
+                        )
+                        smoothed_position = self._track_position_for_log(
+                            first_intruder_track, "abs_cartesian_x_y_z_smoothed"
+                        )
+                        if detected_position is not None:
+                            enc_log._in_pos_detected.append(detected_position[:3])
+                        if smoothed_position is not None:
+                            enc_log._in_pos_smoothed.append(smoothed_position)
             else:
                 # Tracker is on SFF
                 if sff:

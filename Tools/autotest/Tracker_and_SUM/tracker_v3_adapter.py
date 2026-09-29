@@ -53,10 +53,14 @@ class TrackerV3Adapter:
         )
         self._tracker.eo_tracker.association.debug_sink = (
             lambda record: self._debug_log("v3_association", **record)
+        )
+        self._tracker.track_state_manager.debug_sink = (
+            lambda record: self._debug_log("v3_range_update", **record)
         )        
         self._tracker.track_state_manager.ukf_config.range_bias_scale = 0.0
         self.plot = False
         self.plot_save_path = None
+        self._uncertainty_plotter = None
         models = importlib.import_module("tracker.models.detections")
         self._detection_summary_type = models.DetectionSummary
         states = importlib.import_module("tracker.models.states")
@@ -273,6 +277,10 @@ class TrackerV3Adapter:
                         "frame_id": frame_id,
                         "detection_time": detection_time,
                         "camera_name": camera_name,
+                        "pixel": [
+                            self._field(item, "abs_cx", self._field(item, "cx", 0.0)),
+                            self._field(item, "abs_cy", self._field(item, "cy", 0.0)),
+                        ],
                         "raw_range": raw_range,
                         "scaled_range": scaled_range,
                         "legacy_bias": legacy_bias,
@@ -389,6 +397,21 @@ class TrackerV3Adapter:
         )
 
     def create_daidalus_input(self, ownship_state, intruder_states):
-        return self._tracker.create_daidalus_input(
+        payload = self._tracker.create_daidalus_input(
             ownship_state, intruder_states
         ).to_dict()
+        if self.plot and self.plot_save_path:
+            try:
+                if self._uncertainty_plotter is None:
+                    from .tracker_v3_uncertainty_plot import TrackerV3UncertaintyPlotter
+                    self._uncertainty_plotter = TrackerV3UncertaintyPlotter()
+                saved = self._uncertainty_plotter.save_if_new_second(
+                    ownship_state, intruder_states, payload, self.plot_save_path
+                )
+                if saved is not None:
+                    self._debug_log("v3_uncertainty_plot_saved", path=str(saved))
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Failed to save tracker v3 uncertainty plot"
+                )
+        return payload
